@@ -17,7 +17,7 @@ PYINSTALLER_REPO="https://github.com/SomberNight/pyinstaller.git"
 PYINSTALLER_COMMIT=46fc8155710631f84ebe20e32e0a6ba6df76d366
 # ^ tag 3.5, plus a custom commit that fixes cross-compilation with MinGW
 
-#DebugSatochip pyscard
+#Satochip pyscard
 #PYSCARD_FILENAME=pyscard-1.9.7-cp36-cp36m-win_amd64.whl #python64-bits
 #PYSCARD_URL=https://sourceforge.net/projects/pyscard/files/pyscard/pyscard%201.9.7/pyscard-1.9.7-cp36-cp36m-win_amd64.whl/download
 #PYSCARD_SHA256=c63a87e4e7c87ce4c1299a1d8e0cae4e43f27451ca210f2c54f2dcd7467565c5
@@ -75,11 +75,11 @@ download_if_not_exist "$CACHEDIR/$ZBAR_FILENAME" "$ZBAR_URL"
 verify_hash "$CACHEDIR/$ZBAR_FILENAME" "$ZBAR_SHA256"
 wine "$CACHEDIR/$ZBAR_FILENAME" /S
 
-#DebugSatochip install pyscard
+#Satochip install pyscard
 info "Installing pyscard..."
 download_if_not_exist $PYSCARD_FILENAME "$PYSCARD_URL"
 verify_hash $PYSCARD_FILENAME "$PYSCARD_SHA256"
-$PYTHON -m pip install "$PWD/$PYSCARD_FILENAME"
+$PYTHON -m pip install "$CACHEDIR/$PYSCARD_FILENAME"
 
 info "Installing NSIS."
 download_if_not_exist "$CACHEDIR/$NSIS_FILENAME" "$NSIS_URL"

@@ -22,18 +22,9 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from electrum_ltc import util, keystore, ecc, bip32, crypto
-from electrum_ltc import transaction
 from electrum_ltc.plugin import BasePlugin, hook
-from electrum_ltc.i18n import _
-from electrum_ltc.util import bh2u, bfh
 from electrum_ltc.logging import get_logger
 
-from electrum_ltc.gui.qt.transaction_dialog import show_transaction
-from electrum_ltc.gui.qt.util import WaitingDialog
-
-import sys
-import traceback
 import hashlib
 import base64
 import time
@@ -62,7 +53,8 @@ class Plugin(BasePlugin):
         server.delete(id_2FA)
         server.delete(replyhash)
         server.put(id_2FA, msg)
-
+        _logger.info(f"challenge sent to id_2FA:{id_2FA}")
+                
         # wait for reply
         timeout= 180
         period=10
