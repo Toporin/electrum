@@ -2,34 +2,35 @@ from electroncash.i18n import _
 from electroncash.util import print_error
 from electroncash.plugins import run_hook
 from electroncash_gui.qt.util import EnterButton, Buttons, CloseButton, OkButton, CancelButton, WindowModalDialog, WWLabel  #from electrum.gui.qt.util import (EnterButton, Buttons, CloseButton, OkButton, WindowModalDialog)
-    
+
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import QPushButton, QLabel, QVBoxLayout, QWidget, QGridLayout, QLineEdit, QCheckBox
 
 from functools import partial
 
+from ..hw_wallet.qt import QtHandlerBase, QtPluginBase
 #satochip
 from .satochip import SatochipPlugin
 from .CardConnector import CardConnector
-from ..hw_wallet.qt import QtHandlerBase, QtPluginBase
+
 
 class Plugin(SatochipPlugin, QtPluginBase):
     # icon_unpaired = "satochip_unpaired.png"
     # icon_paired = "satochip.png"
     icon_unpaired = ":icons/satochip_unpaired.png"
     icon_paired = ":icons/satochip.png"
-    
+
     #def __init__(self, parent, config, name):
     #    BasePlugin.__init__(self, parent, config, name)
-    
+
     def create_handler(self, window):
         return Satochip_Handler(window)
-        
+
     def requires_settings(self):
         # Return True to add a Settings button.
         return True
 
-    def settings_widget(self, window): 
+    def settings_widget(self, window):
         # Return a button that when pressed presents a settings dialog.
         return EnterButton(_('Settings'), partial(self.settings_dialog, window))
 
@@ -42,25 +43,25 @@ class Plugin(SatochipPlugin, QtPluginBase):
         vbox.addStretch()
         vbox.addLayout(Buttons(CloseButton(d), OkButton(d)))
         d.show()
-    
+
     def show_settings_dialog(self, window, keystore):
         # When they click on the icon for Satochip we come here.
         device_id = self.choose_device(window, keystore)
         if device_id:
             SatochipSettingsDialog(window, self, keystore, device_id).exec_()
-    
+
 class Satochip_Handler(QtHandlerBase):
 
     def __init__(self, win):
         super(Satochip_Handler, self).__init__(win, 'Satochip')
-        
-    #TODO: something?    
-    
+
+    #TODO: something?
+
 class SatochipSettingsDialog(WindowModalDialog):
     '''This dialog doesn't require a device be paired with a wallet.
     We want users to be able to wipe a device even if they've forgotten
-    their PIN.'''    
-    
+    their PIN.'''
+
     def __init__(self, window, plugin, keystore, device_id):
         title = _("{} Settings").format(plugin.device)
         super(SatochipSettingsDialog, self).__init__(window, title)
@@ -76,7 +77,7 @@ class SatochipSettingsDialog(WindowModalDialog):
             if not client:
                 raise RuntimeError("Device not connected")
             return client
-        
+
         body = QWidget()
         body_layout = QVBoxLayout(body)
         grid = QGridLayout()
@@ -90,12 +91,12 @@ class SatochipSettingsDialog(WindowModalDialog):
 
         grid.addWidget(title , 0,0, 1,2, Qt.AlignHCenter)
         y = 3
-        
+
         rows = [
             ('fw_version', _("Firmware Version")),
             ('sw_version', _("Electrum Support")),
             ('is_seeded', _("Wallet seeded")),
-            ('needs_2FA', _("Requires 2FA ")),            
+            ('needs_2FA', _("Requires 2FA ")),
         ]
         for row_num, (member_name, label) in enumerate(rows):
             widget = QLabel('<tt>')
@@ -105,9 +106,9 @@ class SatochipSettingsDialog(WindowModalDialog):
             grid.addWidget(widget, y, 1, 1, 1, Qt.AlignLeft)
             setattr(self, member_name, widget)
             y += 1
-        
+
         body_layout.addLayout(grid)
-            
+
         pin_btn = QPushButton('Change PIN')
         def _change_pin():
             thread.add(connect_and_doit, on_success=self.change_pin)
@@ -137,41 +138,41 @@ class SatochipSettingsDialog(WindowModalDialog):
         v_supported= (CardConnector.SATOCHIP_PROTOCOL_MAJOR_VERSION<<8)+CardConnector.SATOCHIP_PROTOCOL_MINOR_VERSION
         sw_rel= hex(v_supported)
         self.sw_version.setText('<tt>%s' % sw_rel)
-        
+
         (response, sw1, sw2, d)=client.cc.card_get_status()
         if (sw1==0x90 and sw2==0x00):
-            v_applet= (d["protocol_major_version"]<<8)+d["protocol_minor_version"] 
+            v_applet= (d["protocol_major_version"]<<8)+d["protocol_minor_version"]
             fw_rel= hex(v_applet)
             self.fw_version.setText('<tt>%s' % fw_rel)
-            
+
             #is_seeded?
-            try: 
+            try:
                 client.cc.card_bip32_get_authentikey()
                 self.is_seeded.setText('<tt>%s' % "yes")
             except Exception:
                 self.is_seeded.setText('<tt>%s' % "no")
-            
+
             # needs2FA?
-            if len(response)>=9 and response[8]==0X01: 
+            if len(response)>=9 and response[8]==0X01:
                 self.needs_2FA.setText('<tt>%s' % "yes")
-            elif len(response)>=9 and response[8]==0X00: 
+            elif len(response)>=9 and response[8]==0X00:
                 self.needs_2FA.setText('<tt>%s' % "no")
             else:
                 self.needs_2FA.setText('<tt>%s' % "(unknown)")
-            
+
         else:
             fw_rel= "(unitialized)"
             self.fw_version.setText('<tt>%s' % fw_rel)
             self.needs_2FA.setText('<tt>%s' % "(unitialized)")
             self.is_seeded.setText('<tt>%s' % "no")
-            
-        
+
+
 
     def change_pin(self, client):
         # old pin
         msg = _("Enter the current PIN for your Satochip:")
         (is_PIN, oldpin, oldpin)= client.PIN_dialog(msg)
-        
+
         # new pin
         while (True):
             msg = _("Enter a new PIN for your Satochip:")
@@ -183,19 +184,19 @@ class SatochipSettingsDialog(WindowModalDialog):
                 client.handler.show_error(msg)
             else:
                 break
-        
-        oldpin= list(oldpin)    
-        newpin= list(newpin)  
+
+        oldpin= list(oldpin)
+        newpin= list(newpin)
         (response, sw1, sw2)= client.cc.card_change_PIN(0, oldpin, newpin)
         if (sw1==0x90 and sw2==0x00):
-            msg= _("PIN changeg successfully!")
+            msg= _("PIN changed successfully!")
             client.handler.show_error(msg)
         else:
             msg= _("Failed to change PIN!")
             client.handler.show_error(msg)
-    
+
     def reset_seed(self, client):
-        
+
         # pin
         msg = ''.join([
             _("WARNING!\n"),
@@ -206,15 +207,15 @@ class SatochipSettingsDialog(WindowModalDialog):
         (password, reset_2FA)= self.reset_seed_dialog(msg)
         pin = password.encode('utf8')
         pin= list(pin)
-        
+
         # if 2FA is enabled, get challenge-response
         hmac=[]
         if (client.cc.needs_2FA==None):
             (response, sw1, sw2, d)=client.cc.card_get_status()
-        if client.cc.needs_2FA: 
+        if client.cc.needs_2FA:
             # challenge based on authentikey
             authentikeyx= bytearray(client.cc.parser.authentikey_coordx).hex()
-            
+
             # format & encrypt msg
             import json
             msg= {'action':"reset_seed", 'authentikeyx':authentikeyx}
@@ -225,12 +226,12 @@ class SatochipSettingsDialog(WindowModalDialog):
             d['id_2FA']= id_2FA
             # print_error("encrypted message: "+msg_out)
             print_error("id_2FA: "+id_2FA)
-            
+
             #do challenge-response with 2FA device...
             client.handler.show_message('2FA request sent! Approve or reject request on your second device.')
             run_hook('do_challenge_response', d)
             # decrypt and parse reply to extract challenge response
-            try: 
+            try:
                 reply_encrypt= d['reply_encrypt']
             except Exception as e:
                 self.give_error("No response received from 2FA.\nPlease ensure that the Satochip-2FA plugin is enabled in Tools>Optional Features", True)
@@ -239,8 +240,8 @@ class SatochipSettingsDialog(WindowModalDialog):
             reply_decrypt= reply_decrypt.split(":")
             chalresponse=reply_decrypt[1]
             hmac= list(bytes.fromhex(chalresponse))
-            
-        # send request 
+
+        # send request
         (response, sw1, sw2) = client.cc.card_reset_seed(pin, hmac)
         if (sw1==0x90 and sw2==0x00):
             msg= _("Seed reset successfully!\nYou should close this wallet and launch the wizard to generate a new wallet.")
@@ -249,8 +250,8 @@ class SatochipSettingsDialog(WindowModalDialog):
         else:
             msg= _(f"Failed to reset seed with error code: {hex(sw1)}{hex(sw2)}")
             client.handler.show_error(msg)
-            
-        if reset_2FA and client.cc.needs_2FA:     
+
+        if reset_2FA and client.cc.needs_2FA:
             # challenge based on ID_2FA
             # format & encrypt msg
             import json
@@ -262,12 +263,12 @@ class SatochipSettingsDialog(WindowModalDialog):
             d['id_2FA']= id_2FA
             # print_error("encrypted message: "+msg_out)
             print_error("id_2FA: "+id_2FA)
-            
+
             #do challenge-response with 2FA device...
             client.handler.show_message('2FA request sent! Approve or reject request on your second device.')
             run_hook('do_challenge_response', d)
             # decrypt and parse reply to extract challenge response
-            try: 
+            try:
                 reply_encrypt= d['reply_encrypt']
             except Exception as e:
                 self.give_error("No response received from 2FA.\nPlease ensure that the Satochip-2FA plugin is enabled in Tools>Optional Features", True)
@@ -276,8 +277,8 @@ class SatochipSettingsDialog(WindowModalDialog):
             reply_decrypt= reply_decrypt.split(":")
             chalresponse=reply_decrypt[1]
             hmac= list(bytes.fromhex(chalresponse))
-            
-            # send request 
+
+            # send request
             (response, sw1, sw2) = client.cc.card_reset_2FA_key(hmac)
             if (sw1==0x90 and sw2==0x00):
                 msg= _("2FA reset successfully!")
@@ -285,25 +286,24 @@ class SatochipSettingsDialog(WindowModalDialog):
                 client.handler.show_error(msg)
             else:
                 msg= _(f"Failed to reset 2FA with error code: {hex(sw1)}{hex(sw2)}")
-                client.handler.show_error(msg)    
-        
+                client.handler.show_error(msg)
+
     def reset_seed_dialog(self, msg):
         parent = self.top_level_window()
         d = WindowModalDialog(parent, _("Enter PIN"))
         pw = QLineEdit()
         pw.setEchoMode(2)
         pw.setMinimumWidth(200)
-        
+
         cb_reset_2FA = QCheckBox(_('Also reset 2FA'))
-        
+
         vbox = QVBoxLayout()
         vbox.addWidget(WWLabel(msg))
         vbox.addWidget(pw)
         vbox.addWidget(cb_reset_2FA)
         vbox.addLayout(Buttons(CancelButton(d), OkButton(d)))
         d.setLayout(vbox)
-        
+
         passphrase = pw.text() if d.exec_() else None
         reset_2FA= cb_reset_2FA.isChecked()
         return (passphrase, reset_2FA)
-        

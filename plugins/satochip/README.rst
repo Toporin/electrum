@@ -4,9 +4,9 @@ Electron-Cash-Satochip - Lightweight Bitcoin Cash client for the Satochip Hardwa
 ::
 
   Licence: MIT Licence
-  Author: Jonald Fyookball modified by Toporin 
+  Author: The Electron Cash Developers; Satochip portions by Toporin
   Language: Python (>= 3.6)
-  Homepage: 
+  Homepage:
 
 Introduction
 ============
@@ -31,17 +31,17 @@ Open a PowerShell command line in the Electron-Cash folder
 
 In PowerShell, install the Electron-Cash dependencies::
 
-    python -m pip install .   
-    
+    python -m pip install .
+
 You may also ned to install Python3-pyqt5::
 
     python -m pip install pyqt5
-    
+
 Install pyscard from https://pyscard.sourceforge.io/
 Pyscard is required to connect to the smartcard::
 
     python -m pip install pyscard
-    
+
 In case of error message, you may also install pyscard from the installer:
 Download the .whl files from https://sourceforge.net/projects/pyscard/files/pyscard/pyscard%201.9.7/ and run::
 
@@ -50,7 +50,7 @@ Download the .whl files from https://sourceforge.net/projects/pyscard/files/pysc
 In PowerShell, run Electron Cash on the testnet (-v allows for verbose output)::
 
     python .\electron-cash  -v --testnet
-    
+
 
 Development version (Ubuntu)
 ==============================
@@ -63,34 +63,34 @@ Qt interface, install the Qt dependencies::
     sudo apt-get install python3-pyqt5
 
 Check out the code from GitHub::
-    
-    git clone https://github.com/Toporin/Electron-Cash-Satochip.git 
+
+    git clone https://github.com/Toporin/Electron-Cash-Satochip.git
     cd Electron-Cash-Satochip
-    
-In the Electron-Cash folder:    
-    
+
+In the Electron-Cash folder:
+
 Run install (this should install dependencies)::
 
     python3 -m pip install .
-    
+
 Install pyscard (https://pyscard.sourceforge.io/)
-Pyscard is required to connect to the smartcard:: 
+Pyscard is required to connect to the smartcard::
     sudo apt-get install pcscd
     sudo apt-get install python3-pyscard
 (For alternatives, see https://github.com/LudovicRousseau/pyscard/blob/master/INSTALL.md for more detailed installation instructions)
 
- 
+
 To run Electron Cash use::
  python3 electron-cash  -v --testnet
- 
- 
+
+
 Test suite
 =============
- 
+
 To run the test suite, run::
 
     python -m unittest plugins.satochip.test_CardConnector
- 
+
 The test suite uses the following default PIN code: "12345678".
 If you run the test suite after (or before) Electron Cash, you may block the card if the PIN used are not the same!
 If the card is locked, you will have to reinstall the javacard applet on the card.

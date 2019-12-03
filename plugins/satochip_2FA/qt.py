@@ -40,15 +40,15 @@ class Plugin(BasePlugin):
 
     def is_available(self):
         return True
-    
-    # send the challenge and get the reply 
+
+    # send the challenge and get the reply
     @hook
     def do_challenge_response(self, d):
-        
+
         id_2FA= d['id_2FA']
-        msg= d['msg_encrypt']        
+        msg= d['msg_encrypt']
         replyhash= hashlib.sha256(id_2FA.encode('utf-8')).hexdigest()
-        
+
         #purge server from old messages then sends message
         server.delete(id_2FA)
         server.delete(replyhash)
@@ -73,8 +73,7 @@ class Plugin(BasePlugin):
             # poll every t seconds
             time.sleep(period)
             timeout-=period
-        
+
         if reply is None:
             self.print_error("Error: Time-out without server reply...")
-            d['reply_encrypt']= None #default 
-    
+            d['reply_encrypt']= None #default

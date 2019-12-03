@@ -154,11 +154,11 @@ prepare_wine() {
         PYINSTALLER_REPO='https://github.com/EchterAgo/pyinstaller.git'
         PYINSTALLER_COMMIT=1a8b2d47c277c451f4e358d926a47c096a5615ec
 
-        #DebugSatochip pyscard
-        PYSCARD_FILENAME=pyscard-1.9.8-cp36-cp36m-win32.whl #python32-bits
-        PYSCARD_URL=https://ci.appveyor.com/api/buildjobs/j60tkykj6vh0ppiy/artifacts/dist%2Fpyscard-1.9.8-cp36-cp36m-win32.whl
-        PYSCARD_SHA256=4641b5db53fb3562671b7b7c685ddf8f715180e2809106fb2a9361dfad553b4b        
-        
+        # Satochip pyscard
+        PYSCARD_FILENAME=pyscard-1.9.9-cp36-cp36m-win32.whl  # python 3.6, 32-bit
+        PYSCARD_URL=https://github.com/cculianu/Electron-Cash-Build-Tools/releases/download/v1.0/pyscard-1.9.9-cp36-cp36m-win32.whl
+        PYSCARD_SHA256=99d2b450f322f9ed9682fd2a99d95ce781527e371006cded38327efca8158fe7
+
         ## These settings probably don't need change
         export WINEPREFIX=$HOME/wine64
         #export WINEARCH='win32'
@@ -200,15 +200,11 @@ prepare_wine() {
             wine msiexec /i "${msifile}.msi" /qn TARGETDIR=$PYHOME || fail "Failed to install Python component: ${msifile}"
         done
 
-        info "Upgrading pip ..."
-        # upgrade pip
-        $PYTHON -m pip install pip --upgrade
-
         # The below requirements-wine-build.txt uses hashed packages that we
         # need for pyinstaller and other parts of the build.  Using a hashed
         # requirements file hardens the build against dependency attacks.
         info "Installing build requirements from requirements-wine-build.txt ..."
-        $PYTHON -m pip install --no-warn-script-location -I -r $here/requirements-wine-build.txt || fail "Failed to install build requirements"
+        $PYTHON -m pip install --no-warn-script-location -I -U -r $here/requirements-wine-build.txt || fail "Failed to install build requirements"
 
         info "Compiling PyInstaller bootloader with AntiVirus False-Positive Protection™ ..."
         mkdir pyinstaller
@@ -275,11 +271,11 @@ prepare_wine() {
         cp "$here"/../zbar/libzbar-0.dll $WINEPREFIX/drive_c/tmp/ || fail "Could not copy libzbar to its destination"
         cp libusb/libusb/.libs/libusb-1.0.dll $WINEPREFIX/drive_c/tmp/ || fail "Could not copy libusb to its destination"
 
-        info "Installing pyscard..." #DebugSatochip 
+        info "Installing pyscard..."
         wget -O $PYSCARD_FILENAME "$PYSCARD_URL"
         verify_hash $PYSCARD_FILENAME "$PYSCARD_SHA256"
-        $PYTHON -m pip install $PYSCARD_FILENAME #"$CACHEDIR/$PYSCARD_FILENAME"
-        
+        $PYTHON -m pip install --no-warn-script-location $PYSCARD_FILENAME || fail "Could not install pyscard"
+
         popd  # out of homedir/tmp
         popd  # out of $here
 
@@ -365,8 +361,7 @@ build_the_app() {
         wine "$WINEPREFIX/drive_c/Program Files (x86)/NSIS/makensis.exe" /DPRODUCT_VERSION=$VERSION electron-cash.nsi || fail "makensis failed"
 
         cd dist
-        #mv $NAME_ROOT-setup.exe $NAME_ROOT-$VERSION-setup.exe  || fail "Failed to move $NAME_ROOT-$VERSION-setup.exe to the output dist/ directory"
-        mv Electron-Cash-setup.exe $NAME_ROOT-$VERSION-setup.exe  || fail "Failed to move $NAME_ROOT-$VERSION-setup.exe to the output dist/ directory" #Satochip 
+        mv $NAME_ROOT-setup.exe $NAME_ROOT-$VERSION-setup.exe  || fail "Failed to move $NAME_ROOT-$VERSION-setup.exe to the output dist/ directory"
 
         ls -la *.exe
         sha256sum *.exe

@@ -38,7 +38,7 @@ from .import bitcoin
 from .address import Address, AddressError
 from .bitcoin import hash_160, COIN, TYPE_ADDRESS
 from .i18n import _
-from .transaction import Transaction, multisig_script
+from .transaction import Transaction, multisig_script, OPReturn
 from .paymentrequest import PR_PAID, PR_UNPAID, PR_UNKNOWN, PR_EXPIRED
 from .plugins import run_hook
 
@@ -472,11 +472,24 @@ class Commands:
         return bitcoin.verify_message(address, sig, message)
 
     def _mktx(self, outputs, fee=None, change_addr=None, domain=None, nocheck=False,
-              unsigned=False, password=None, locktime=None):
+              unsigned=False, password=None, locktime=None, op_return=None, op_return_raw=None):
+        if op_return and op_return_raw:
+            raise ValueError('Both op_return and op_return_raw cannot be specified together!')
         self.nocheck = nocheck
         change_addr = self._resolver(change_addr)
         domain = None if domain is None else map(self._resolver, domain)
         final_outputs = []
+        if op_return:
+            final_outputs.append(OPReturn.output_for_stringdata(op_return))
+        elif op_return_raw:
+            try:
+                op_return_raw = op_return_raw.strip()
+                tmp = bytes.fromhex(op_return_raw).hex()
+                assert tmp == op_return_raw.lower()
+                op_return_raw = tmp
+            except Exception as e:
+                raise ValueError("op_return_raw must be an even number of hex digits") from e
+            final_outputs.append(OPReturn.output_for_rawhex(op_return_raw))
         for address, amount in outputs:
             address = self._resolver(address)
             amount = satoshis(amount)
@@ -492,11 +505,12 @@ class Commands:
         return tx
 
     @command('wp')
-    def payto(self, destination, amount, fee=None, from_addr=None, change_addr=None, nocheck=False, unsigned=False, password=None, locktime=None):
+    def payto(self, destination, amount, fee=None, from_addr=None, change_addr=None, nocheck=False, unsigned=False, password=None, locktime=None,
+              op_return=None, op_return_raw=None):
         """Create a transaction. """
         tx_fee = satoshis(fee)
         domain = from_addr.split(',') if from_addr else None
-        tx = self._mktx([(destination, amount)], tx_fee, change_addr, domain, nocheck, unsigned, password, locktime)
+        tx = self._mktx([(destination, amount)], tx_fee, change_addr, domain, nocheck, unsigned, password, locktime, op_return, op_return_raw)
         return tx.as_dict()
 
     @command('wp')
@@ -510,7 +524,8 @@ class Commands:
     @command('w')
     def history(self, year=None, show_addresses=False, show_fiat=False):
         """Wallet history. Returns the transaction history of your wallet."""
-        kwargs = {'show_addresses': show_addresses}
+        kwargs = {'show_addresses': show_addresses,
+                  'fee_calc_timeout' : 1.0 }   # we are aggressive here in how much time we are willing to wait for aynch. fee calc
         if year:
             import time
             start_date = datetime.datetime(year, 1, 1)
@@ -521,6 +536,7 @@ class Commands:
             from .exchange_rate import FxThread
             fx = FxThread(self.config, None)
             kwargs['fx'] = fx
+            fx.run()  # invoke the fx to grab history rates at least once, otherwise results will always contain "No data" (see #1671)
         return self.wallet.export_history(**kwargs)
 
     @command('w')
@@ -591,7 +607,7 @@ class Commands:
     def encrypt(self, pubkey, message):
         """Encrypt a message with a public key. Use quotes if the message contains whitespaces."""
         if not isinstance(pubkey, (str, bytes, bytearray)) or not isinstance(message, (str, bytes, bytearray)):
-            raise RuntimeError("pubkey and message text must both be strings")
+            raise ValueError("pubkey and message text must both be strings")
         message = to_bytes(message)
         res =  bitcoin.encrypt_message(message, pubkey)
         if isinstance(res, (bytes, bytearray)):
@@ -604,7 +620,7 @@ class Commands:
     def decrypt(self, pubkey, encrypted, password=None):
         """Decrypt a message encrypted with a public key."""
         if not isinstance(pubkey, str) or not isinstance(encrypted, str):
-            raise RuntimeError("pubkey and encrypted text must both be strings")
+            raise ValueError("pubkey and encrypted text must both be strings")
         res = self.wallet.decrypt_message(pubkey, encrypted, password)
         if isinstance(res, (bytes, bytearray)):
             # prevent "JSON serializable" errors in case this came from
@@ -665,7 +681,7 @@ class Commands:
         return self.wallet.get_unused_address().to_ui_string()
 
     @command('w')
-    def addrequest(self, amount, memo='', expiration=None, force=False, payment_url=None):
+    def addrequest(self, amount, memo='', expiration=None, force=False, payment_url=None, index_url=None):
         """Create a payment request, using the first unused address of the wallet.
         The address will be condidered as used after this operation.
         If no payment is received, the address will be considered as unused if the payment request is deleted from the wallet."""
@@ -681,7 +697,7 @@ class Commands:
                 return False
         amount = satoshis(amount)
         expiration = int(expiration) if expiration else None
-        req = self.wallet.make_payment_request(addr, amount, memo, expiration, payment_url = payment_url)
+        req = self.wallet.make_payment_request(addr, amount, memo, expiration, payment_url = payment_url, index_url = index_url)
         self.wallet.add_payment_request(req, self.config)
         out = self.wallet.get_payment_request(addr, self.config)
         return self._format_request(out)
@@ -774,6 +790,7 @@ command_options = {
     'labels':      ("-l", "Show the labels of listed addresses"),
     'nocheck':     (None, "Do not verify aliases"),
     'imax':        (None, "Maximum number of inputs"),
+    'index_url':   (None, 'Override the URL where you would like users to be shown the BIP70 Payment Request'),
     'fee':         ("-f", "Transaction fee (in BCH)"),
     'from_addr':   ("-F", "Source address (must be a wallet address; use sweep to spend from non-wallet address)."),
     'change_addr': ("-c", "Change address. Default is a spare address, or the source address if it's not in the wallet"),
@@ -795,6 +812,8 @@ command_options = {
     'show_fiat':   (None, "Show fiat value of transactions"),
     'year':        (None, "Show history for a given year"),
     'payment_url': (None, 'Optional URL where you would like users to POST the BIP70 Payment message'),
+    'op_return':   (None, "Specify string data to add to the transaction as an OP_RETURN output"),
+    'op_return_raw': (None, 'Specify raw hex data to add to the transaction as an OP_RETURN output (0x6a aka the OP_RETURN byte will be auto-prepended for you so do not include it)'),
 }
 
 
@@ -923,7 +942,8 @@ def get_parser():
     add_global_options(parser_gui)
     # daemon
     parser_daemon = subparsers.add_parser('daemon', help="Run Daemon")
-    parser_daemon.add_argument("subcommand", choices=['start', 'status', 'stop', 'load_wallet', 'close_wallet'], nargs='?')
+    parser_daemon.add_argument("subcommand", nargs='?', help="start, stop, status, load_wallet, close_wallet. Other commands may be added by plugins.")
+    parser_daemon.add_argument("subargs", nargs='*', metavar='arg', help="additional arguments (used by plugins)")
     #parser_daemon.set_defaults(func=run_daemon)
     add_network_options(parser_daemon)
     add_global_options(parser_daemon)
