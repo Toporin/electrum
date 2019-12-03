@@ -50,7 +50,7 @@ NO_SIGNATURE = 'ff'
 class SerializationError(Exception):
     """ Thrown when there's a problem deserializing or serializing """
 
-class InputValueMissing(Exception):
+class InputValueMissing(ValueError):
     """ thrown when the value of an input is needed but not present """
 
 class BCDataStream(object):
@@ -517,6 +517,7 @@ class Transaction:
         if self._inputs is not None:
             return
         d = deserialize(self.raw)
+        self.invalidate_common_sighash_cache()
         self._inputs = d['inputs']
         self._outputs = [(x['type'], x['address'], x['value']) for x in d['outputs']]
         assert all(isinstance(output[1], (PublicKey, Address, ScriptOutput))
@@ -689,20 +690,68 @@ class Transaction:
         warnings.warn("warning: deprecated tx.nHashType()", FutureWarning, stacklevel=2)
         return 0x01 | (cls.SIGHASH_FORKID + (cls.FORKID << 8))
 
-    def serialize_preimage(self, i, nHashType=0x00000041):
+    def invalidate_common_sighash_cache(self):
+        ''' Call this to invalidate the cached common sighash (computed by
+        `calc_common_sighash` below).
+
+        This is function is for advanced usage of this class where the caller
+        has mutated the transaction after computing its signatures and would
+        like to explicitly delete the cached common sighash. See
+        `calc_common_sighash` below. '''
+        try: del self._cached_sighash_tup
+        except AttributeError: pass
+
+    def calc_common_sighash(self, use_cache=False):
+        """ Calculate the common sighash components that are used by
+        transaction signatures. If `use_cache` enabled then this will return
+        already-computed values from the `._cached_sighash_tup` attribute, or
+        compute them if necessary (and then store).
+
+        For transactions with N inputs and M outputs, calculating all sighashes
+        takes only O(N + M) with the cache, as opposed to O(N^2 + NM) without
+        the cache.
+
+        Returns three 32-long bytes objects: (hashPrevouts, hashSequence, hashOutputs).
+
+        Warning: If you modify non-signature parts of the transaction
+        afterwards, this cache will be wrong! """
+        inputs = self.inputs()
+        outputs = self.outputs()
+        meta = (len(inputs), len(outputs))
+
+        if use_cache:
+            try:
+                cmeta, res = self._cached_sighash_tup
+            except AttributeError:
+                pass
+            else:
+                # minimal heuristic check to detect bad cached value
+                if cmeta == meta:
+                    # cache hit and heuristic check ok
+                    return res
+                else:
+                    del cmeta, res, self._cached_sighash_tup
+
+        hashPrevouts = Hash(bfh(''.join(self.serialize_outpoint(txin) for txin in inputs)))
+        hashSequence = Hash(bfh(''.join(int_to_hex(txin.get('sequence', 0xffffffff - 1), 4) for txin in inputs)))
+        hashOutputs = Hash(bfh(''.join(self.serialize_output(o) for o in outputs)))
+
+        res = hashPrevouts, hashSequence, hashOutputs
+        # cach resulting value, along with some minimal metadata to defensively
+        # program against cache invalidation (due to class mutation).
+        self._cached_sighash_tup = meta, res
+        return res
+
+    def serialize_preimage(self, i, nHashType=0x00000041, use_cache = False):
+        """ See `.calc_common_sighash` for explanation of use_cache feature """
         if (nHashType & 0xff) != 0x41:
             raise ValueError("other hashtypes not supported; submit a PR to fix this!")
 
         nVersion = int_to_hex(self.version, 4)
         nHashType = int_to_hex(nHashType, 4)
         nLocktime = int_to_hex(self.locktime, 4)
-        inputs = self.inputs()
-        outputs = self.outputs()
-        txin = inputs[i]
 
-        hashPrevouts = bh2u(Hash(bfh(''.join(self.serialize_outpoint(txin) for txin in inputs))))
-        hashSequence = bh2u(Hash(bfh(''.join(int_to_hex(txin.get('sequence', 0xffffffff - 1), 4) for txin in inputs))))
-        hashOutputs = bh2u(Hash(bfh(''.join(self.serialize_output(o) for o in outputs))))
+        txin = self.inputs()[i]
         outpoint = self.serialize_outpoint(txin)
         preimage_script = self.get_preimage_script(txin)
         scriptCode = var_int(len(preimage_script) // 2) + preimage_script
@@ -711,7 +760,10 @@ class Transaction:
         except KeyError:
             raise InputValueMissing
         nSequence = int_to_hex(txin.get('sequence', 0xffffffff - 1), 4)
-        preimage = nVersion + hashPrevouts + hashSequence + outpoint + scriptCode + amount + nSequence + hashOutputs + nLocktime + nHashType
+
+        hashPrevouts, hashSequence, hashOutputs = self.calc_common_sighash(use_cache = use_cache)
+
+        preimage = nVersion + bh2u(hashPrevouts) + bh2u(hashSequence) + outpoint + scriptCode + amount + nSequence + bh2u(hashOutputs) + nLocktime + nHashType
         return preimage
 
     def serialize(self, estimate_size=False):
@@ -760,19 +812,26 @@ class Transaction:
         self.raw = None
 
     def input_value(self):
-        return sum(x['value'] for x in (self.fetched_inputs() or self.inputs()))
+        ''' Will return the sum of all input values, if the input values
+        are known (may consult self.fetched_inputs() to get a better idea of
+        possible input values).  Will raise InputValueMissing if input values
+        are missing. '''
+        try:
+            return sum(x['value'] for x in (self.fetched_inputs() or self.inputs()))
+        except (KeyError, TypeError, ValueError) as e:
+            raise InputValueMissing from e
 
     def output_value(self):
         return sum(val for tp, addr, val in self.outputs())
 
     def get_fee(self):
         ''' Try and calculate the fee based on the input data, and returns it as
-        satoshis (int). Can raise one of: (KeyError, TypeError, ValueError) on
-        tx's where fee data is missing, so client code should catch these. '''
+        satoshis (int). Can raise InputValueMissing on tx's where fee data is
+        missing, so client code should catch that. '''
         # first, check if coinbase; coinbase tx always has 0 fee
-        if self._inputs and self._inputs[0].get('type') == 'coinbase':
+        if self.inputs() and self._inputs[0].get('type') == 'coinbase':
             return 0
-        # otherwise just sum up all values - may raise
+        # otherwise just sum up all values - may raise InputValueMissing
         return self.input_value() - self.output_value()
 
     @profiler
@@ -1185,7 +1244,7 @@ class Transaction:
                         wallet.network.cancel_requests(func)
             if len(inps) == len(self._inputs) and eph.get('_fetch') == t:  # sanity check
                 eph.pop('_fetch', None)  # potential race condition here, popping wrong t -- but in practice w/ CPython threading it won't matter
-                print_error("fetch_input_data: elapsed {} sec".format(time.time()-t0))
+                print_error(f"fetch_input_data: elapsed {(time.time()-t0):.4f} sec")
                 if done_callback:
                     done_callback(*done_args)
         # /doIt

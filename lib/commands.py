@@ -524,7 +524,8 @@ class Commands:
     @command('w')
     def history(self, year=None, show_addresses=False, show_fiat=False):
         """Wallet history. Returns the transaction history of your wallet."""
-        kwargs = {'show_addresses': show_addresses}
+        kwargs = {'show_addresses': show_addresses,
+                  'fee_calc_timeout' : 1.0 }   # we are aggressive here in how much time we are willing to wait for aynch. fee calc
         if year:
             import time
             start_date = datetime.datetime(year, 1, 1)
@@ -535,6 +536,7 @@ class Commands:
             from .exchange_rate import FxThread
             fx = FxThread(self.config, None)
             kwargs['fx'] = fx
+            fx.run()  # invoke the fx to grab history rates at least once, otherwise results will always contain "No data" (see #1671)
         return self.wallet.export_history(**kwargs)
 
     @command('w')
@@ -940,7 +942,8 @@ def get_parser():
     add_global_options(parser_gui)
     # daemon
     parser_daemon = subparsers.add_parser('daemon', help="Run Daemon")
-    parser_daemon.add_argument("subcommand", choices=['start', 'status', 'stop', 'load_wallet', 'close_wallet'], nargs='?')
+    parser_daemon.add_argument("subcommand", nargs='?', help="start, stop, status, load_wallet, close_wallet. Other commands may be added by plugins.")
+    parser_daemon.add_argument("subargs", nargs='*', metavar='arg', help="additional arguments (used by plugins)")
     #parser_daemon.set_defaults(func=run_daemon)
     add_network_options(parser_daemon)
     add_global_options(parser_daemon)
