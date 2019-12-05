@@ -213,7 +213,7 @@ class Satochip_KeyStore(Hardware_KeyStore):
             # challenge based on sha256(btcheader+msg)
             # format & encrypt msg
             import json
-            msg= {'action':"sign_msg", 'msg':message}
+            msg= {'action':"sign_msg", 'msg':message, 'alt':"Litecoin"}
             msg=  json.dumps(msg)
             (id_2FA, msg_out)= client.cc.card_crypt_transaction_2FA(msg, True)
             d={}
@@ -240,7 +240,7 @@ class Satochip_KeyStore(Hardware_KeyStore):
             keynbr= 0xFF #for extended key
             (depth, bytepath)= bip32path2bytes(address_path)
             (key, chaincode)=client.cc.card_bip32_get_extendedkey(bytepath)
-            (response2, sw1, sw2) = client.cc.card_sign_message(keynbr, message_byte, hmac)
+            (response2, sw1, sw2) = client.cc.card_sign_message(keynbr, message_byte, hmac, altcoin='Litecoin')
             if (sw1!=0x90 or sw2!=0x00):
                 _logger.info("[satochip] SatochipPlugin: error during sign_message(): sw12="+hex(sw1)+" "+hex(sw2))#debugSatochip
                 compsig=b''

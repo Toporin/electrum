@@ -21,9 +21,13 @@ PYINSTALLER_COMMIT=46fc8155710631f84ebe20e32e0a6ba6df76d366
 #PYSCARD_FILENAME=pyscard-1.9.7-cp36-cp36m-win_amd64.whl #python64-bits
 #PYSCARD_URL=https://sourceforge.net/projects/pyscard/files/pyscard/pyscard%201.9.7/pyscard-1.9.7-cp36-cp36m-win_amd64.whl/download
 #PYSCARD_SHA256=c63a87e4e7c87ce4c1299a1d8e0cae4e43f27451ca210f2c54f2dcd7467565c5
-PYSCARD_FILENAME=pyscard-1.9.8-cp36-cp36m-win32.whl #python32-bits
-PYSCARD_URL=https://ci.appveyor.com/api/buildjobs/j60tkykj6vh0ppiy/artifacts/dist%2Fpyscard-1.9.8-cp36-cp36m-win32.whl
-PYSCARD_SHA256=4641b5db53fb3562671b7b7c685ddf8f715180e2809106fb2a9361dfad553b4b
+# PYSCARD_FILENAME=pyscard-1.9.8-cp36-cp36m-win32.whl #python32-bits
+# PYSCARD_URL=https://ci.appveyor.com/api/buildjobs/j60tkykj6vh0ppiy/artifacts/dist%2Fpyscard-1.9.8-cp36-cp36m-win32.whl
+# PYSCARD_SHA256=4641b5db53fb3562671b7b7c685ddf8f715180e2809106fb2a9361dfad553b4b
+PYSCARD_FILENAME=pyscard-1.9.9-cp36-cp36m-win32.whl  # python 3.6, 32-bit
+PYSCARD_URL=https://ci.appveyor.com/api/buildjobs/3uiua5o4llvpegbp/artifacts/dist/pyscard-1.9.9-cp36-cp36m-win32.whl
+PYSCARD_SHA256=99d2b450f322f9ed9682fd2a99d95ce781527e371006cded38327efca8158fe7
+
 
 PYTHON_VERSION=3.6.8
 
