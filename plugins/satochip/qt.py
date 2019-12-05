@@ -166,7 +166,6 @@ class SatochipSettingsDialog(WindowModalDialog):
             self.needs_2FA.setText('<tt>%s' % "(unitialized)")
             self.is_seeded.setText('<tt>%s' % "no")
 
-
     def change_pin(self, client):
         # old pin
         msg = _("Enter the current PIN for your Satochip:")
