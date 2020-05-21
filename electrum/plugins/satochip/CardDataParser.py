@@ -94,6 +94,39 @@ class CardDataParser:
         
         return (self.pubkey, self.chaincode)
     
+    def parse_initiate_secure_channel(self, response):
+        
+        # double signature: first is self-signed, second by authentikey (optional)
+        # firs self-signed sig: data= coordx
+        #_logger.info(f'parse_initiate_secure_channel: first signature recovery')
+        data_size = ((response[0] & 0xff)<<8) + (response[1] & 0xff)
+        data= response[2:(2+data_size)]
+        msg_size= 2+data_size
+        msg= response[0:msg_size]
+        sig_size = ((response[msg_size] & 0xff)<<8) + (response[msg_size+1] & 0xff)
+        signature= response[(msg_size+2):(msg_size+2+sig_size)]
+        if sig_size==0:
+           raise ValueError("Signature missing")
+        # self-signed
+        coordx=data
+        self.pubkey= self.get_pubkey_from_signature(coordx, msg, signature)
+        self.pubkey_coordx= coordx
+        
+        # second signature by authentikey (optional)
+        #_logger.info(f'parse_initiate_secure_channel: second signature recovery')
+        msg2_size= msg_size+2+sig_size
+        sig2_size = ((response[msg2_size] & 0xff)<<8) + (response[msg2_size+1] & 0xff)  
+        if sig2_size>0 and self.authentikey_coordx:
+            msg2= response[0:msg2_size]
+            signature2= response[(msg2_size+2):(msg2_size+2+sig2_size)] 
+            authentikey= self.get_pubkey_from_signature(self.authentikey_coordx, msg2, signature2)
+            if authentikey != self.authentikey:
+                raise ValueError("Recovered authentikey does not correspond to registered authentikey!")
+        
+        print("In parse_initiate_secure_channel: successfuly recovered pubkey:"+ self.pubkey.get_public_key_bytes(compressed=False).hex()) #debug
+        return (self.pubkey)
+    
+    
     ##############
     def parse_message_signature(self, response, message, pubkey):
         

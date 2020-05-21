@@ -8,6 +8,7 @@ from smartcard.sw.SWExceptions import SWException
 
 from .JCconstants import JCconstants 
 from .TxParser import TxParser
+from .SecureChannel import SecureChannel
 
 from electrum.ecc import ECPubkey, msg_magic
 from electrum.i18n import _
@@ -51,7 +52,8 @@ class RemovalObserver(CardObserver):
         (addedcards, removedcards) = actions
         for card in addedcards:
             _logger.info(f"+Inserted: {toHexString(card.atr)}")     
-            self.parent.client.handler.update_status(True)            
+            self.parent.client.handler.update_status(True)     
+            #TODO: update get_status & secure_channel
         for card in removedcards:
             _logger.info(f"-Removed: {toHexString(card.atr)}")
             self.parent.pin= None #reset PIN
@@ -67,8 +69,10 @@ class CardConnector:
     # v0.7: add 2-Factor-Authentication (2FA) support
     # v0.8: support seed reset and pin change               
     # v0.9: message signing for Litecoin (and other alts)    
+    # v0.11: support for (mandatory) secure channel
     SATOCHIP_PROTOCOL_MAJOR_VERSION=0
-    SATOCHIP_PROTOCOL_MINOR_VERSION=9
+    SATOCHIP_PROTOCOL_MINOR_VERSION=11
+    SATOCHIP_PROTOCOL_VERSION= (SATOCHIP_PROTOCOL_MAJOR_VERSION<<8)+SATOCHIP_PROTOCOL_MINOR_VERSION
     
     # define the apdus used in this script
     BYTE_AID= [0x53,0x61,0x74,0x6f,0x43,0x68,0x69,0x70] #SatoChip
@@ -78,7 +82,15 @@ class CardConnector:
         self.client=client
         self.parser=client.parser
         self.cardtype = AnyCardType()
-        self.needs_2FA = None                     
+        self.needs_2FA = None      
+        self.is_seeded= None
+        self.setup_done= None
+        self.needs_secure_channel= None
+        # cache PIN
+        self.pin_nbr=None
+        self.pin=None
+        # secure channel
+        self.sc= None
         try: 
             # request card insertion
             self.cardrequest = CardRequest(timeout=10, cardType=self.cardtype)
@@ -91,21 +103,65 @@ class CardConnector:
             self.cardobserver = RemovalObserver(self)
             self.cardmonitor.addObserver(self.cardobserver)
             # connect to the card and perform a few transmits
-            self.cardservice.connection.connect()
-            # cache PIN
-            self.pin_nbr=None
-            self.pin=None
+            self.cardservice.connection.connect()    
         except CardRequestTimeoutException:
             _logger.exception('time-out: no card inserted during last 10s')
         except Exception as exc:
             _logger.exception("Error during connection: {str(exc)}")
         
-    def card_transmit(self, apdu):
+    def card_transmit_old(self, apdu):
         try:
             (response, sw1, sw2) = self.cardservice.connection.transmit(apdu)
             if (sw1==0x9C) and (sw2==0x06):
                 (response, sw1, sw2)= self.card_verify_PIN() 
                 (response, sw1, sw2)= self.cardservice.connection.transmit(apdu)
+            return (response, sw1, sw2)
+        except CardConnectionException: 
+            # may be the card has been removed
+            try:
+                self.cardrequest = CardRequest(timeout=10, cardType=self.cardtype)
+                self.cardservice = self.cardrequest.waitforcard()
+                # attach the console tracer
+                self.observer = LogCardConnectionObserver()#ConsoleCardConnectionObserver()
+                self.cardservice.connection.addObserver(self.observer)
+                # connect to the card and perform a few transmits
+                self.cardservice.connection.connect()
+                # retransmit apdu
+                (response, sw1, sw2) = self.cardservice.connection.transmit(apdu)
+                if (sw1==0x9C) and (sw2==0x06):
+                    (response, sw1, sw2)= self.card_verify_PIN() 
+                    (response, sw1, sw2)= self.cardservice.connection.transmit(apdu)
+                return (response, sw1, sw2)                                 
+            except CardRequestTimeoutException:
+                _logger.exception('time-out: no card inserted during last 10s')
+            except Exception as exc:
+                _logger.exception("Error during connection: {str(exc)}")
+
+    def card_transmit(self, apdu):
+        try:
+            
+            #DEBUG
+            print("Plaintext C-APDU: "+str(toHexString(apdu)))
+        
+            #encrypt apdu
+            ins= apdu[1]
+            if (self.needs_secure_channel) and (ins not in [0x81, 0x82, JCconstants.INS_GET_STATUS]):
+                apdu = self.card_encrypt_secure_channel(apdu)
+        
+            (response, sw1, sw2) = self.cardservice.connection.transmit(apdu)
+            
+            #decrypt response
+            if (sw1==0x90) and (sw2==0x00):
+                if (self.needs_secure_channel) and (ins not in [0x81, 0x82, JCconstants.INS_GET_STATUS]):
+                    response= self.card_decrypt_secure_channel(response)
+            
+            if (sw1==0x9C) and (sw2==0x06):
+                (response, sw1, sw2)= self.card_verify_PIN() 
+                (response, sw1, sw2)= self.cardservice.connection.transmit(apdu)
+                
+            #DEBUG
+            print("Plaintext R-APDU: "+str(toHexString(response)))
+            
             return (response, sw1, sw2)
         except CardConnectionException: 
             # may be the card has been removed
@@ -158,6 +214,7 @@ class CardConnector:
             d["protocol_minor_version"]= response[1]
             d["applet_major_version"]= response[2]
             d["applet_minor_version"]= response[3]
+            d["protocol_version"]= (d["protocol_major_version"]<<8)+d["protocol_minor_version"] 
             if len(response) >=8:
                 d["PIN0_remaining_tries"]= response[4]
                 d["PUK0_remaining_tries"]= response[5]
@@ -166,7 +223,25 @@ class CardConnector:
                 self.needs_2FA= d["needs2FA"]= False #default value
             if len(response) >=9:
                 self.needs_2FA= d["needs2FA"]= False if response[8]==0X00 else True
-                
+            if len(response) >=10:
+                self.is_seeded= d["is_seeded"]= False if response[9]==0X00 else True    
+            if len(response) >=11:
+                self.setup_done= d["setup_done"]= False if response[10]==0X00 else True    
+            else:
+                self.setup_done= d["setup_done"]= True    
+            if len(response) >=12:
+                self.needs_secure_channel= d["needs_secure_channel"]= False if response[11]==0X00 else True    
+            else:
+                self.needs_secure_channel= d["needs_secure_channel"]= False
+        
+        elif (sw1==0x9c) and (sw2==0x04):
+            self.setup_done= d["setup_done"]= False    
+            self.needs_secure_channel= d["needs_secure_channel"]= False
+            
+        else:
+            _logger.info(f"[CardConnector] card_get_status: unknown get-status() error! sw12={hex(sw1)} {hex(sw2)}")#debugSatochip
+            raise RuntimeError('Unknown get-status() error code:'+hex(sw1)+' '+hex(sw2))
+        
         return (response, sw1, sw2, d)
     
     def card_setup(self, 
@@ -326,7 +401,7 @@ class CardConnector:
         
         # return signature as byte array
         # data is cut into chunks, each processed in a different APDU call
-        chunk= 160 # max APDU data=255 => chunk<=255-(4+2)
+        chunk= 128 # max APDU data=255 => chunk<=255-(4+2)
         buffer_offset=0
         buffer_left=len(message)
 
@@ -373,23 +448,25 @@ class CardConnector:
         # send apdu
         response, sw1, sw2 = self.card_transmit(apdu)
         return (response, sw1, sw2)
+    
+    # This method was deprecated since it does the same as the more generic card_sign_message()
+    # This allows to simplify code, facilitate maintenance and reduce surface.
+    # def card_sign_short_message(self, keynbr, message, hmac=b''):
+        # if (type(message)==str):
+            # message = message.encode('utf8')
         
-    def card_sign_short_message(self, keynbr, message, hmac=b''):
-        if (type(message)==str):
-            message = message.encode('utf8')
-        
-        # for message less than one chunk in size
-        cla= JCconstants.CardEdge_CLA
-        ins= JCconstants.INS_SIGN_SHORT_MESSAGE
-        p1= keynbr # oxff=>BIP32 otherwise STD
-        p2= 0x00
-        le= message.length+2+ len(hmac)
-        apdu=[cla, ins, p1, p2, le]
-        apdu+=[(message.length>>8 & 0xFF), (message.length & 0xFF)]
-        apdu+=message+hmac
-        # send apdu
-        response, sw1, sw2 = self.card_transmit(apdu)
-        return (response, sw1, sw2)      
+        # # for message less than one chunk in size
+        # cla= JCconstants.CardEdge_CLA
+        # ins= JCconstants.INS_SIGN_SHORT_MESSAGE
+        # p1= keynbr # oxff=>BIP32 otherwise STD
+        # p2= 0x00
+        # le= message.length+2+ len(hmac)
+        # apdu=[cla, ins, p1, p2, le]
+        # apdu+=[(message.length>>8 & 0xFF), (message.length & 0xFF)]
+        # apdu+=message+hmac
+        # # send apdu
+        # response, sw1, sw2 = self.card_transmit(apdu)
+        # return (response, sw1, sw2)      
     
     def card_parse_transaction(self, transaction, is_segwit=False):
             
@@ -475,6 +552,7 @@ class CardConnector:
         # send apdu (contains sensitive data!)
         (response, sw1, sw2) = self.card_transmit(apdu)    
         return (response, sw1, sw2)
+        
     def card_crypt_transaction_2FA(self, msg, is_encrypt=True):
         if (type(msg)==str):
             msg = msg.encode('utf8')
@@ -515,8 +593,13 @@ class CardConnector:
                 _logger.info('Padding error!')
             # send apdu
             (response, sw1, sw2) = self.card_transmit(apdu)
-            
-        chunk= 192 # max APDU data=256 => chunk<=255-(4+2)
+        
+        # msg is cut in chunks and each chunk is sent to the card for encryption/decryption
+        # given the protocol overhead, size of each chunk is limited in size:
+        # without secure channel, an APDU command is max 255 byte, so chunk<=255-(5+2)
+        # with secure channel, data is encrypted and HMACed, the max size is then 152 bytes
+        # (overhead: 20b mac, padding, iv, byte_size)
+        chunk= 128 #152 
         buffer_offset=0
         buffer_left=len(msg)    
         # CIPHER PROCESS/UPDATE (optionnal)
@@ -602,15 +685,29 @@ class CardConnector:
             cla= JCconstants.CardEdge_CLA
             ins= JCconstants.INS_VERIFY_PIN
             apdu=[cla, ins, 0x00, 0x00, len(pin_0)] + pin_0
+            
+            if (self.needs_secure_channel):
+                apdu = self.card_encrypt_secure_channel(apdu)
+                
             response, sw1, sw2 = self.cardservice.connection.transmit(apdu)
+            
+            # correct PIN: cache PIN value
             if sw1==0x90 and sw2==0x00: 
-                self.set_pin(0, pin_0) #cache PIN value
+                self.set_pin(0, pin_0) 
                 return (response, sw1, sw2)     
-            elif sw1==0x9c and sw2==0x02:
+            # wrong PIN, get remaining tries available (since v0.11)
+            elif sw1==0x63 and (sw2 & 0xc0)==0xc0:
+                self.set_pin(0, None) #reset cached PIN value
+                pin_left= (sw2 & ~0xc0)
+                msg = _("Wrong PIN! {} tries remaining!").format(pin_left)
+                self.client.handler.show_error(msg)
+            # wrong PIN (legacy before v0.11)    
+            elif sw1==0x9c and sw2==0x02: 
                 self.set_pin(0, None) #reset cached PIN value
                 pin_left= d.get("PIN0_remaining_tries",-1)-1
                 msg = _("Wrong PIN! {} tries remaining!").format(pin_left)
                 self.client.handler.show_error(msg)
+            # blocked PIN
             elif sw1==0x9c and sw2==0x0c:
                 msg = _("Too many failed attempts! Your Satochip has been blocked! You need your PUK code to unblock it.")
                 self.client.handler.show_error(msg)
@@ -630,7 +727,29 @@ class CardConnector:
         apdu=[cla, ins, p1, p2, lc] + [len(old_pin)] + old_pin + [len(new_pin)] + new_pin
         # send apdu
         response, sw1, sw2 = self.card_transmit(apdu)
-        self.set_pin(0, None)
+        #self.set_pin(0, None)
+        
+        # correct PIN: cache PIN value
+        if sw1==0x90 and sw2==0x00: 
+            self.set_pin(pin_nbr, new_pin) 
+        # wrong PIN, get remaining tries available (since v0.11)
+        elif sw1==0x63 and (sw2 & 0xc0)==0xc0:
+            self.set_pin(pin_nbr, None) #reset cached PIN value
+            pin_left= (sw2 & ~0xc0)
+            msg = _("Wrong PIN! {} tries remaining!").format(pin_left)
+            self.client.handler.show_error(msg)
+        # wrong PIN (legacy before v0.11)    
+        elif sw1==0x9c and sw2==0x02: 
+            self.set_pin(pin_nbr, None) #reset cached PIN value
+            pin_left= d.get("PIN0_remaining_tries",-1)-1
+            msg = _("Wrong PIN! {} tries remaining!").format(pin_left)
+            self.client.handler.show_error(msg)
+        # blocked PIN
+        elif sw1==0x9c and sw2==0x0c:
+            msg = _("Too many failed attempts! Your Satochip has been blocked! You need your PUK code to unblock it.")
+            self.client.handler.show_error(msg)
+            raise RuntimeError('Device blocked with error code:'+hex(sw1)+' '+hex(sw2))
+        
         return (response, sw1, sw2)      
     
     def card_unblock_PIN(self, pin_nbr, ublk):
@@ -642,6 +761,25 @@ class CardConnector:
         apdu=[cla, ins, p1, p2, lc] + ublk
         # send apdu
         response, sw1, sw2 = self.card_transmit(apdu)
+        
+        # wrong PUK, get remaining tries available (since v0.11)
+        if sw1==0x63 and (sw2 & 0xc0)==0xc0:
+            self.set_pin(pin_nbr, None) #reset cached PIN value
+            pin_left= (sw2 & ~0xc0)
+            msg = _("Wrong PUK! {} tries remaining!").format(pin_left)
+            self.client.handler.show_error(msg)
+        # wrong PUK (legacy before v0.11)    
+        elif sw1==0x9c and sw2==0x02: 
+            self.set_pin(pin_nbr, None) #reset cached PIN value
+            pin_left= d.get("PUK0_remaining_tries",-1)-1
+            msg = _("Wrong PUK! {} tries remaining!").format(pin_left)
+            self.client.handler.show_error(msg)
+        # blocked PUK
+        elif sw1==0x9c and sw2==0x0c:
+            msg = _("Too many failed attempts! Your Satochip has been blocked!")
+            self.client.handler.show_error(msg)
+            raise RuntimeError('Device blocked with error code:'+hex(sw1)+' '+hex(sw2))
+        
         return (response, sw1, sw2)      
         
     def card_logout_all(self):
@@ -655,6 +793,80 @@ class CardConnector:
         response, sw1, sw2 = self.card_transmit(apdu)
         self.set_pin(0, None)                   
         return (response, sw1, sw2)      
+    
+    def card_initiate_secure_channel(self):
+        print("In card_initiate_secure_channel()")
+        cla= JCconstants.CardEdge_CLA
+        ins= 0x81
+        p1= 0x00 
+        p2= 0x00
+        
+        # get sc
+        self.sc= SecureChannel()
+        pubkey= list(self.sc.sc_pubkey_serialized)
+        lc= len(pubkey) #65
+        apdu=[cla, ins, p1, p2, lc] + pubkey
+        
+        # send apdu 
+        response, sw1, sw2 = self.card_transmit(apdu) 
+        
+        # parse response and extract pubkey...
+        peer_pubkey = self.parser.parse_initiate_secure_channel(response)
+        peer_pubkey_bytes= peer_pubkey.get_public_key_bytes(compressed=False)
+        self.sc.initiate_secure_channel(peer_pubkey_bytes)
+        
+        return peer_pubkey             
+    
+    def card_encrypt_secure_channel(self, apdu):
+        print("In card_encrypt_secure_channel()")
+        cla= JCconstants.CardEdge_CLA
+        ins= 0x82
+        p1= 0x00 
+        p2= 0x00
+        
+        # for encryption, the data is padded with PKCS#7
+        blocksize= 16
+        size=len(apdu)
+        padsize= blocksize - (size%blocksize)
+        apdu= apdu+ [padsize]*padsize
+        
+        (iv, ciphertext, mac)= self.sc.encrypt_secure_channel(bytes(apdu))
+        data= list(iv) + [len(ciphertext)>>8, len(ciphertext)&0xff] + list(ciphertext) + [len(mac)>>8, len(mac)&0xff] + list(mac)
+        lc= len(data)
+        
+        encrypted_apdu= [cla, ins, p1, p2, lc]+data
+        
+        return encrypted_apdu
+    
+    def card_decrypt_secure_channel(self, response):
+        print("In card_decrypt_secure_channel()")
+        
+        if len(response)==0:
+            return response
+        elif len(response)<18:
+            raise RuntimeError('Encrypted response has wrong lenght!')
+        
+        iv= bytes(response[0:16])
+        size= ((response[16] & 0xff)<<8) + (response[17] & 0xff)
+        ciphertext= bytes(response[18:])
+        if len(ciphertext)!=size:
+            print('Ciphertext has wrong lenght!')
+            print('Expected size: '+str(size)+ ' got: ' + str(len(ciphertext)))
+            #raise RuntimeError('Ciphertext has wrong lenght!')
+            
+        plaintext= self.sc.decrypt_secure_channel(iv, ciphertext)
+        
+        print('Plaintext with padding:'+str(list(plaintext)))
+        
+        #remove padding
+        plaintext= list(plaintext)
+        pad= plaintext[-1]
+        plaintext=plaintext[0:-pad]
+        
+        print('Plaintext without padding:'+str(list(plaintext)))
+        
+        return plaintext
+    
     
 class AuthenticationError(Exception):    
     """Raised when the command requires authentication first"""

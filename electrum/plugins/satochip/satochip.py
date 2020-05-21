@@ -216,6 +216,7 @@ class Satochip_KeyStore(Hardware_KeyStore):
             msg= {'action':"sign_msg", 'msg':message}
             msg=  json.dumps(msg)
             (id_2FA, msg_out)= client.cc.card_crypt_transaction_2FA(msg, True)
+            
             d={}
             d['msg_encrypt']= msg_out
             d['id_2FA']= id_2FA
@@ -443,21 +444,25 @@ class SatochipPlugin(HW_PluginBase):
                             _('Make sure it is in the correct state.'))
         client.handler = self.create_handler(wizard)
         
-        # check applet version
+        # check setup
         while(True):
             (response, sw1, sw2, d)=client.cc.card_get_status()
-            if (sw1==0x90 and sw2==0x00):
-                v_supported= (CardConnector.SATOCHIP_PROTOCOL_MAJOR_VERSION<<8)+CardConnector.SATOCHIP_PROTOCOL_MINOR_VERSION
-                v_applet= (d["protocol_major_version"]<<8)+d["protocol_minor_version"] 
-                _logger.info(f"[SatochipPlugin] setup_device(): Satochip version={hex(v_applet)} Electrum supported version= {hex(v_supported)}")#debugSatochip
-                if (v_supported<v_applet):
-                    msg=(_('The version of your Satochip is higher than supported by Electrum. You should update Electrum to ensure correct functioning!')+ '\n' 
-                                + f'    Satochip version: {d["protocol_major_version"]}.{d["protocol_minor_version"]}' + '\n' 
-                                + f'    Supported version: {CardConnector.SATOCHIP_PROTOCOL_MAJOR_VERSION}.{CardConnector.SATOCHIP_PROTOCOL_MINOR_VERSION}')
-                    client.handler.show_error(msg)
-                break
+            
+            # check version
+            v_supported= CardConnector.SATOCHIP_PROTOCOL_VERSION # (CardConnector.SATOCHIP_PROTOCOL_MAJOR_VERSION<<8)+CardConnector.SATOCHIP_PROTOCOL_MINOR_VERSION
+            v_applet= d["protocol_version"] # (d["protocol_major_version"]<<8)+d["protocol_minor_version"] 
+            _logger.info(f"[SatochipPlugin] setup_device(): Satochip version={hex(v_applet)} Electrum supported version= {hex(v_supported)}")#debugSatochip
+            if (v_supported<v_applet):
+                msg=(_('The version of your Satochip is higher than supported by Electrum. You should update Electrum to ensure correct functioning!')+ '\n' 
+                            + f'    Satochip version: {d["protocol_major_version"]}.{d["protocol_minor_version"]}' + '\n' 
+                            + f'    Supported version: {CardConnector.SATOCHIP_PROTOCOL_MAJOR_VERSION}.{CardConnector.SATOCHIP_PROTOCOL_MINOR_VERSION}')
+                client.handler.show_error(msg)
+            
+            if (client.cc.needs_secure_channel):
+                client.cc.card_initiate_secure_channel()
+            
             # setup device (done only once)
-            elif (sw1==0x9c and sw2==0x04):
+            if not (client.cc.setup_done):
                 # PIN dialog
                 while (True):
                     msg = _("Enter a new PIN for your Satochip:")
@@ -491,13 +496,12 @@ class SatochipPlugin(HW_PluginBase):
                         pin_tries_1, ublk_tries_1, pin_1, ublk_1, 
                         secmemsize, memsize, 
                         create_object_ACL, create_key_ACL, create_pin_ACL)
-                if sw1!=0x90 or sw2!=0x00:                 
+                if sw1!=0x90 or sw2!=0x00:       
                     _logger.info(f"[SatochipPlugin] setup_device(): unable to set up applet!  sw12={hex(sw1)} {hex(sw2)}")#debugSatochip
                     raise RuntimeError('Unable to setup the device with error code:'+hex(sw1)+' '+hex(sw2))
             else:
-                _logger.info(f"[SatochipPlugin] unknown get-status() error! sw12={hex(sw1)} {hex(sw2)}")#debugSatochip
-                raise RuntimeError('Unknown get-status() error code:'+hex(sw1)+' '+hex(sw2))
-            
+                break
+                
         # verify pin:
         client.cc.card_verify_PIN()
                 
