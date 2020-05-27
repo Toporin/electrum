@@ -1,6 +1,5 @@
 from electrum.i18n import _
 from electrum.logging import get_logger
-from electrum.plugin import run_hook
 from electrum.gui.qt.util import (EnterButton, Buttons, CloseButton, OkButton, CancelButton, WindowModalDialog, WWLabel)
 from PyQt5.QtCore import Qt, pyqtSignal                                          
 from PyQt5.QtWidgets import (QPushButton, QLabel, QVBoxLayout, QWidget, QGridLayout, QLineEdit, QCheckBox)
@@ -8,8 +7,11 @@ from functools import partial
 
 #satochip
 from .satochip import SatochipPlugin
-from .CardConnector import CardConnector                                        
 from ..hw_wallet.qt import QtHandlerBase, QtPluginBase
+
+#pysatochip 
+from pysatochip.CardConnector import CardConnector
+from pysatochip.Satochip2FA import Satochip2FA                                       
 
 _logger = get_logger(__name__)
 
@@ -96,7 +98,8 @@ class SatochipSettingsDialog(WindowModalDialog):
             ('fw_version', _("Firmware Version")),
             ('sw_version', _("Electrum Support")),
             ('is_seeded', _("Wallet seeded")),
-            ('needs_2FA', _("Requires 2FA ")),            
+            ('needs_2FA', _("Requires 2FA")),     
+            ('needs_SC', _("Secure Channel")),        
         ]
         for row_num, (member_name, label) in enumerate(rows):
             widget = QLabel('<tt>')
@@ -135,74 +138,77 @@ class SatochipSettingsDialog(WindowModalDialog):
 
     def show_values(self, client):
         _logger.info("Show value!")
-        v_supported= (CardConnector.SATOCHIP_PROTOCOL_MAJOR_VERSION<<8)+CardConnector.SATOCHIP_PROTOCOL_MINOR_VERSION
-        sw_rel= hex(v_supported)
+        #v_supported= (CardConnector.SATOCHIP_PROTOCOL_MAJOR_VERSION<<8)+CardConnector.SATOCHIP_PROTOCOL_MINOR_VERSION
+        #sw_rel= hex(v_supported)
+        sw_rel= 'v' + str(CardConnector.SATOCHIP_PROTOCOL_MAJOR_VERSION) + '.' + str(CardConnector.SATOCHIP_PROTOCOL_MINOR_VERSION)
         self.sw_version.setText('<tt>%s' % sw_rel)
         
         (response, sw1, sw2, d)=client.cc.card_get_status()
         if (sw1==0x90 and sw2==0x00):
-            v_applet= (d["protocol_major_version"]<<8)+d["protocol_minor_version"] 
-            fw_rel= hex(v_applet)
+            #v_applet= (d["protocol_major_version"]<<8)+d["protocol_minor_version"] 
+            #fw_rel= hex(v_applet)
+            fw_rel= 'v' + str(d["protocol_major_version"]) + '.' + str(d["protocol_minor_version"])
             self.fw_version.setText('<tt>%s' % fw_rel)
             
             #is_seeded?
-            try: 
-                client.cc.card_bip32_get_authentikey()
-                self.is_seeded.setText('<tt>%s' % "yes")
-            except Exception:
-                self.is_seeded.setText('<tt>%s' % "no")
+            if len(response) >=10:
+                self.is_seeded.setText('<tt>%s' % "yes") if d["is_seeded"] else self.is_seeded.setText('<tt>%s' % "no")
+            else: #for earlier versions
+                try: 
+                    client.cc.card_bip32_get_authentikey()
+                    self.is_seeded.setText('<tt>%s' % "yes")
+                except Exception:
+                    self.is_seeded.setText('<tt>%s' % "no")
             
             # needs2FA?
-            if len(response)>=9 and response[8]==0X01: 
+            if d["needs2FA"]:
                 self.needs_2FA.setText('<tt>%s' % "yes")
-            elif len(response)>=9 and response[8]==0X00: 
-                self.needs_2FA.setText('<tt>%s' % "no")
             else:
-                self.needs_2FA.setText('<tt>%s' % "(unknown)")
+                self.needs_2FA.setText('<tt>%s' % "no")
+            # if len(response)>=9 and response[8]==0X01: 
+                # self.needs_2FA.setText('<tt>%s' % "yes")
+            # elif len(response)>=9 and response[8]==0X00: 
+                # self.needs_2FA.setText('<tt>%s' % "no")
+            # else:
+                # self.needs_2FA.setText('<tt>%s' % "(unknown)")
+            
+            # needs secure channel
+            if d["needs_secure_channel"]:
+                self.needs_SC.setText('<tt>%s' % "yes")
+            else:
+                self.needs_SC.setText('<tt>%s' % "no")
             
         else:
             fw_rel= "(unitialized)"
             self.fw_version.setText('<tt>%s' % fw_rel)
             self.needs_2FA.setText('<tt>%s' % "(unitialized)")
             self.is_seeded.setText('<tt>%s' % "no")
-            
+            self.needs_SC.setText('<tt>%s' % "(unknown)")
         
 
     def change_pin(self, client):
-        # old pin
-        msg = _("Enter the current PIN for your Satochip:")
-        (is_PIN, oldpin, oldpin)= client.PIN_dialog(msg)
-        if (oldpin is None):
-                return
-                
-        # new pin
-        while (True):
-            msg = _("Enter a new PIN for your Satochip:")
-            (is_PIN, newpin, newpin)= client.PIN_dialog(msg)
-            if (newpin is None):
-                return
-            msg = _("Please confirm the new PIN for your Satochip:")
-            (is_PIN, pin_confirm, pin_confirm)= client.PIN_dialog(msg)
-            if (pin_confirm is None):
-                return
-            if (newpin != pin_confirm):
-                msg= _("The PIN values do not match! Please type PIN again!")
-                client.handler.show_error(msg)
-            else:
-                break
+        _logger.info("In change_pin")
+        msg_oldpin = _("Enter the current PIN for your Satochip:")
+        msg_newpin = _("Enter a new PIN for your Satochip:")
+        msg_confirm = _("Please confirm the new PIN for your Satochip:")
+        msg_error= _("The PIN values do not match! Please type PIN again!")
+        msg_cancel= _("PIN Change cancelled!")
+        (is_pin, oldpin, newpin) = client.PIN_change_dialog(msg_oldpin, msg_newpin, msg_confirm, msg_error, msg_cancel)
+        if (not is_pin):
+            return
         
         oldpin= list(oldpin)    
         newpin= list(newpin)  
         (response, sw1, sw2)= client.cc.card_change_PIN(0, oldpin, newpin)
         if (sw1==0x90 and sw2==0x00):
-            msg= _("PIN changeg successfully!")
+            msg= _("PIN changed successfully!")
             client.handler.show_message(msg)
         else:
             msg= _("Failed to change PIN!")
             client.handler.show_error(msg)
     
     def reset_seed(self, client):
-        
+        _logger.info("In reset_seed")
         # pin
         msg = ''.join([
             _("WARNING!\n"),
@@ -236,7 +242,7 @@ class SatochipSettingsDialog(WindowModalDialog):
             
             #do challenge-response with 2FA device...
             client.handler.show_message('2FA request sent! Approve or reject request on your second device.')
-            run_hook('do_challenge_response', d)
+            Satochip2FA.do_challenge_response(d)
             # decrypt and parse reply to extract challenge response
             try: 
                 reply_encrypt= d['reply_encrypt']
@@ -272,7 +278,7 @@ class SatochipSettingsDialog(WindowModalDialog):
             
             #do challenge-response with 2FA device...
             client.handler.show_message('2FA request sent! Approve or reject request on your second device.')
-            run_hook('do_challenge_response', d)
+            Satochip2FA.do_challenge_response(d)
             # decrypt and parse reply to extract challenge response
             try: 
                 reply_encrypt= d['reply_encrypt']
@@ -295,6 +301,7 @@ class SatochipSettingsDialog(WindowModalDialog):
                 client.handler.show_error(msg)    
         
     def reset_seed_dialog(self, msg):
+        _logger.info("In reset_seed_dialog")
         parent = self.top_level_window()
         d = WindowModalDialog(parent, _("Enter PIN"))
         pw = QLineEdit()
