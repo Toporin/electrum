@@ -23,10 +23,10 @@ from ..hw_wallet import HW_PluginBase
 
 #pysatochip
 from pysatochip.CardConnector import CardConnector, UninitializedSeedError
-#from pysatochip.CardDataParser import CardDataParser
 from pysatochip.JCconstants import JCconstants
 from pysatochip.TxParser import TxParser
 from pysatochip.Satochip2FA import Satochip2FA
+from pysatochip.version import SATOCHIP_PROTOCOL_MAJOR_VERSION, SATOCHIP_PROTOCOL_MINOR_VERSION, SATOCHIP_PROTOCOL_VERSION
 
 #pyscard
 from smartcard.sw.SWExceptions import SWException
@@ -512,13 +512,13 @@ class SatochipPlugin(HW_PluginBase):
             
             # check version
             if  (client.cc.setup_done):
-                v_supported= CardConnector.SATOCHIP_PROTOCOL_VERSION # (CardConnector.SATOCHIP_PROTOCOL_MAJOR_VERSION<<8)+CardConnector.SATOCHIP_PROTOCOL_MINOR_VERSION
-                v_applet= d["protocol_version"] # (d["protocol_major_version"]<<8)+d["protocol_minor_version"] 
+                v_supported= SATOCHIP_PROTOCOL_VERSION 
+                v_applet= d["protocol_version"]
                 _logger.info(f"[SatochipPlugin] setup_device(): Satochip version={hex(v_applet)} Electrum supported version= {hex(v_supported)}")#debugSatochip
                 if (v_supported<v_applet):
                     msg=(_('The version of your Satochip is higher than supported by Electrum. You should update Electrum to ensure correct functioning!')+ '\n' 
                                 + f'    Satochip version: {d["protocol_major_version"]}.{d["protocol_minor_version"]}' + '\n' 
-                                + f'    Supported version: {CardConnector.SATOCHIP_PROTOCOL_MAJOR_VERSION}.{CardConnector.SATOCHIP_PROTOCOL_MINOR_VERSION}')
+                                + f'    Supported version: {SATOCHIP_PROTOCOL_MAJOR_VERSION}.{SATOCHIP_PROTOCOL_MINOR_VERSION}')
                     client.handler.show_error(msg)
                 
                 if (client.cc.needs_secure_channel):

@@ -12,6 +12,7 @@ from ..hw_wallet.qt import QtHandlerBase, QtPluginBase
 #pysatochip 
 from pysatochip.CardConnector import CardConnector
 from pysatochip.Satochip2FA import Satochip2FA                                       
+from pysatochip.version import SATOCHIP_PROTOCOL_MAJOR_VERSION, SATOCHIP_PROTOCOL_MINOR_VERSION
 
 _logger = get_logger(__name__)
 
@@ -138,15 +139,11 @@ class SatochipSettingsDialog(WindowModalDialog):
 
     def show_values(self, client):
         _logger.info("Show value!")
-        #v_supported= (CardConnector.SATOCHIP_PROTOCOL_MAJOR_VERSION<<8)+CardConnector.SATOCHIP_PROTOCOL_MINOR_VERSION
-        #sw_rel= hex(v_supported)
-        sw_rel= 'v' + str(CardConnector.SATOCHIP_PROTOCOL_MAJOR_VERSION) + '.' + str(CardConnector.SATOCHIP_PROTOCOL_MINOR_VERSION)
+        sw_rel= 'v' + str(SATOCHIP_PROTOCOL_MAJOR_VERSION) + '.' + str(SATOCHIP_PROTOCOL_MINOR_VERSION)
         self.sw_version.setText('<tt>%s' % sw_rel)
         
         (response, sw1, sw2, d)=client.cc.card_get_status()
         if (sw1==0x90 and sw2==0x00):
-            #v_applet= (d["protocol_major_version"]<<8)+d["protocol_minor_version"] 
-            #fw_rel= hex(v_applet)
             fw_rel= 'v' + str(d["protocol_major_version"]) + '.' + str(d["protocol_minor_version"])
             self.fw_version.setText('<tt>%s' % fw_rel)
             
@@ -165,12 +162,6 @@ class SatochipSettingsDialog(WindowModalDialog):
                 self.needs_2FA.setText('<tt>%s' % "yes")
             else:
                 self.needs_2FA.setText('<tt>%s' % "no")
-            # if len(response)>=9 and response[8]==0X01: 
-                # self.needs_2FA.setText('<tt>%s' % "yes")
-            # elif len(response)>=9 and response[8]==0X00: 
-                # self.needs_2FA.setText('<tt>%s' % "no")
-            # else:
-                # self.needs_2FA.setText('<tt>%s' % "(unknown)")
             
             # needs secure channel
             if d["needs_secure_channel"]:
