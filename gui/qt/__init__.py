@@ -58,7 +58,7 @@ from electroncash.plugins import run_hook
 from electroncash import WalletStorage
 from electroncash.util import (UserCancelled, PrintError, print_error,
                                standardize_path, finalization_print_error, Weak,
-                               get_new_wallet_name)
+                               get_new_wallet_name, Handlers)
 from electroncash import version
 from electroncash.address import Address
 
@@ -77,6 +77,8 @@ class ElectrumGui(QObject, PrintError):
     update_available_signal = pyqtSignal(bool)
     cashaddr_toggled_signal = pyqtSignal()  # app-wide signal for when cashaddr format is toggled. This used to live in each ElectrumWindow instance but it was recently refactored to here.
     cashaddr_status_button_hidden_signal = pyqtSignal(bool)  # app-wide signal for when cashaddr toggle button is hidden from the status bar
+    shutdown_signal = pyqtSignal()  # signal for requesting an app-wide full shutdown
+    do_in_main_thread_signal = pyqtSignal(object, object, object)
 
     instance = None
 
@@ -90,6 +92,8 @@ class ElectrumGui(QObject, PrintError):
         self.daemon = daemon
         self.plugins = plugins
         self.windows = []
+
+        self._setup_do_in_main_thread_handler()
 
         # Uncomment this call to verify objects are being properly
         # GC-ed when windows are closed
@@ -142,6 +146,7 @@ class ElectrumGui(QObject, PrintError):
         if self.has_auto_update_check():
             self._start_auto_update_timer(first_run = True)
         self.app.focusChanged.connect(self.on_focus_change)  # track last window the user interacted with
+        self.shutdown_signal.connect(self.close, Qt.QueuedConnection)
         run_hook('init_qt', self)
         # We did this once already in the set_dark_theme call, but we do this
         # again here just in case some plugin modified the color scheme.
@@ -157,6 +162,30 @@ class ElectrumGui(QObject, PrintError):
         print_error("[{}] finalized{}".format(__class__.__name__, ' (stale instance)' if stale else ''))
         if hasattr(super(), '__del__'):
             super().__del__()
+
+    def _setup_do_in_main_thread_handler(self):
+        ''' Sets up "do_in_main_thread" handler mechanism for Qt GUI. '''
+        self.do_in_main_thread_signal.connect(self._do_in_main_thread_handler_slot)
+        orig_handler = Handlers.do_in_main_thread
+        weakSelf = Weak.ref(self)
+        def my_do_in_main_thread_handler(func, *args, **kwargs):
+            strongSelf = weakSelf()
+            if strongSelf:
+                # We are still alive, emit the signal which will be handled
+                # in the main thread.
+                strongSelf.do_in_main_thread_signal.emit(func, args, kwargs)
+            else:
+                # We died. Uninstall this handler, invoke original handler.
+                Handlers.do_in_main_thread = orig_handler
+                orig_handler(func, *args, **kwargs)
+        Handlers.do_in_main_thread = my_do_in_main_thread_handler
+
+    def _do_in_main_thread_handler_slot(self, func, args, kwargs):
+        ''' Hooked in to util.Handlers.do_in_main_thread via the
+        do_in_main_thread_signal. This ensures that there is an app-wide
+        mechanism for posting invocations to the main thread.  Currently
+        CashFusion uses this mechanism, but other code may as well. '''
+        func(*args, **kwargs)
 
     def _pre_and_post_app_setup(self):
         ''' Call this before instantiating the QApplication object.  It sets up
@@ -261,6 +290,11 @@ class ElectrumGui(QObject, PrintError):
             sys.exit(msg)
 
     def is_dark_theme_available(self):
+        if sys.platform in ('darwin',):
+            # On OSX, qdarkstyle is kind of broken. We instead rely on Mojave
+            # dark mode if (built in to the OS) for this facility, which the
+            # user can set outside of this application.
+            return False
         try:
             import qdarkstyle
         except:
@@ -268,7 +302,13 @@ class ElectrumGui(QObject, PrintError):
         return True
 
     def set_dark_theme_if_needed(self):
-        use_dark_theme = self.config.get('qt_gui_color_theme', 'default') == 'dark'
+        if sys.platform in ('darwin',):
+            # On OSX, qdarkstyle is kind of broken. We instead rely on Mojave
+            # dark mode if (built in to the OS) for this facility, which the
+            # user can set outside of this application.
+            use_dark_theme = False
+        else:
+            use_dark_theme = self.config.get('qt_gui_color_theme', 'default') == 'dark'
         darkstyle_ver = None
         if use_dark_theme:
             try:
@@ -322,6 +362,9 @@ class ElectrumGui(QObject, PrintError):
             slf = weakSelf()
             slf and slf._expire_cached_password(weakWallet)
         timer.setSingleShot(True); timer.timeout.connect(timeout); timer.start(10000)  # 10 sec
+
+    def cache_password(self, wallet, password):
+        self._cache_password(wallet, password)
 
     def _set_icon(self):
         icon = None
@@ -465,14 +508,14 @@ class ElectrumGui(QObject, PrintError):
                     w.hide()
 
     def close(self):
-        for window in self.windows:
+        for window in list(self.windows):
             window.close()
 
     def new_window(self, path, uri=None):
         # Use a signal as can be called from daemon thread
         self.new_window_signal.emit(path, uri)
 
-    def show_network_dialog(self, parent):
+    def show_network_dialog(self, parent, *, jumpto : str = ''):
         if self.warn_if_no_network(parent):
             return
         if self.nd:
@@ -480,10 +523,12 @@ class ElectrumGui(QObject, PrintError):
             run_hook("on_network_dialog", self.nd)
             self.nd.show()
             self.nd.raise_()
+            if jumpto: self.nd.jumpto(jumpto)
             return
         self.nd = NetworkDialog(self.daemon.network, self.config)
         run_hook("on_network_dialog", self.nd)
         self.nd.show()
+        if jumpto: self.nd.jumpto(jumpto)
 
     def create_window_for_wallet(self, wallet):
         w = ElectrumWindow(self, wallet)
@@ -622,12 +667,12 @@ class ElectrumGui(QObject, PrintError):
 
         if not self.windows:
             self.config.save_last_wallet(window.wallet)
-            # NB: we now unconditionally quit the app after the last wallet
+            # NB: We see if we should quit the app after the last wallet
             # window is closed, even if a network dialog or some other window is
             # open.  It was bizarre behavior to keep the app open when
             # things like a transaction dialog or the network dialog were still
             # up.
-            __class__._quit_after_last_window()  # checks if qApp.quitOnLastWindowClosed() is True, and if so, calls qApp.quit()
+            self._quit_after_last_window()  # central point that checks if we should quit.
 
         #window.deleteLater()  # <--- This has the potential to cause bugs (esp. with misbehaving plugins), so commented-out. The object gets deleted anyway when Python GC kicks in. Forcing a delete may risk python to have a dangling reference to a deleted C++ object.
 
@@ -813,12 +858,17 @@ class ElectrumGui(QObject, PrintError):
             else:
                 self._stop_auto_update_timer()
 
-    @staticmethod
-    def _quit_after_last_window():
-        # on some platforms, not only does exec_ not return but not even
-        # aboutToQuit is emitted (but following this, it should be emitted)
-        if qApp.quitOnLastWindowClosed():
-            qApp.quit()
+    def _quit_after_last_window(self):
+        if any(1 for w in self.windows
+               if isinstance(w, ElectrumWindow) and not w.cleaned_up):
+            # We can get here if we have some top-level ElectrumWindows that
+            # are "minimized to tray" (hidden).  "lastWindowClosed "is emitted
+            # if there are no *visible* windows.  If we actually have hidden
+            # app windows (because the user hid them), then we want to *not*
+            # quit the app. https://doc.qt.io/qt-5/qguiapplication.html#lastWindowClosed
+            # This check and early return fixes issue #1727.
+            return
+        qApp.quit()
 
     def notify(self, message):
         ''' Display a message in the system tray popup notification. On macOS
@@ -908,10 +958,10 @@ class ElectrumGui(QObject, PrintError):
         path = self.config.get_wallet_path()
         if not self.start_new_window(path, self.config.get('url')):
             return
-        signal.signal(signal.SIGINT, lambda *args: self.app.quit())
+        signal.signal(signal.SIGINT, lambda signum, frame: self.shutdown_signal.emit())
 
-        self.app.setQuitOnLastWindowClosed(True)
-        self.app.lastWindowClosed.connect(__class__._quit_after_last_window)
+        self.app.setQuitOnLastWindowClosed(False)  # we want to control this in our slot (since we support non-visible, backgrounded windows via the systray show/hide facility)
+        self.app.lastWindowClosed.connect(self._quit_after_last_window)
 
         def clean_up():
             # Just in case we get an exception as we exit, uninstall the Exception_Hook

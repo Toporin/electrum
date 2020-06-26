@@ -11,8 +11,8 @@ import androidx.fragment.app.DialogFragment
 import com.chaquo.python.Kwarg
 import com.chaquo.python.PyException
 import com.google.zxing.integration.android.IntentIntegrator
-import kotlinx.android.synthetic.main.new_wallet.*
-import kotlinx.android.synthetic.main.new_wallet_2.*
+import kotlinx.android.synthetic.main.wallet_new.*
+import kotlinx.android.synthetic.main.wallet_new_2.*
 import kotlin.properties.Delegates.notNull
 
 
@@ -23,7 +23,7 @@ val libWallet by lazy { libMod("wallet") }
 class NewWalletDialog1 : AlertDialogFragment() {
     override fun onBuildDialog(builder: AlertDialog.Builder) {
         builder.setTitle(R.string.New_wallet)
-            .setView(R.layout.new_wallet)
+            .setView(R.layout.wallet_new)
             .setPositiveButton(R.string.next, null)
             .setNegativeButton(R.string.cancel, null)
     }
@@ -37,13 +37,8 @@ class NewWalletDialog1 : AlertDialogFragment() {
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             try {
                 val name = etName.text.toString()
-                if (name.isEmpty()) throw ToastException(R.string.name_is, Toast.LENGTH_SHORT)
-                if (name.contains("/")) throw ToastException(R.string.invalid_name)
-                if (daemonModel.listWallets().contains(name)) {
-                    throw ToastException(R.string.a_wallet_with_that_name_already_exists_please)
-                }
+                validateWalletName(name)
                 val password = confirmPassword(dialog)
-
                 val nextDialog: DialogFragment
                 val arguments = Bundle().apply {
                     putString("name", name)
@@ -71,6 +66,24 @@ class NewWalletDialog1 : AlertDialogFragment() {
 }
 
 
+fun validateWalletName(name: String) {
+    if (name.isEmpty()) {
+        throw ToastException(R.string.name_is)
+    }
+    if (name.contains("/")) {
+        throw ToastException(R.string.wallet_names)
+    }
+    if (name.toByteArray().size > 200) {
+        // The filesystem limit is probably 255, but we need to leave room for the temporary
+        // filename suffix.
+        throw ToastException(R.string.wallet_name_is_too)
+    }
+    if (daemonModel.listWallets().contains(name)) {
+        throw ToastException(R.string.a_wallet_with_that_name_already_exists_please_enter)
+    }
+}
+
+
 fun confirmPassword(dialog: Dialog): String {
     val password = dialog.etPassword.text.toString()
     if (password.isEmpty()) throw ToastException(R.string.Enter_password, Toast.LENGTH_SHORT)
@@ -86,7 +99,7 @@ abstract class NewWalletDialog2 : TaskLauncherDialog<String>() {
 
     override fun onBuildDialog(builder: AlertDialog.Builder) {
         builder.setTitle(R.string.New_wallet)
-            .setView(R.layout.new_wallet_2)
+            .setView(R.layout.wallet_new_2)
             .setPositiveButton(android.R.string.ok, null)
             .setNegativeButton(R.string.back, null)
     }
@@ -265,7 +278,8 @@ fun setupSeedDialog(fragment: AlertDialogFragment) {
         if (passphrase == null) {
             // Import or generate
             passphrasePanel.visibility = View.VISIBLE
-            tvPassphrasePrompt.setText(R.string.please_enter_your_seed_derivation)
+            tvPassphrasePrompt.setText(app.getString(R.string.you_may_extend) + " " +
+                                       app.getString(R.string.if_you_are))
         } else {
             // Display
             if (passphrase.isNotEmpty()) {
@@ -281,6 +295,6 @@ fun setupSeedDialog(fragment: AlertDialogFragment) {
 
 fun seedAdvice(seed: String): String {
     return app.getString(R.string.please_save, seed.split(" ").size) + " " +
-           app.getString(R.string.this_seed) + " " +
+           app.getString(R.string.this_seed_will) + " " +
            app.getString(R.string.never_disclose)
 }

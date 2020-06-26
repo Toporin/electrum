@@ -36,12 +36,6 @@ pr_icons = {
 
 def _(message): return message
 
-pr_tooltips = {
-    PR_UNPAID:_('Pending'),
-    PR_PAID:_('Paid'),
-    PR_EXPIRED:_('Expired')
-}
-
 expiration_values = [
     (_('1 hour'), 60*60),
     (_('1 day'), 24*60*60),
@@ -63,6 +57,8 @@ class EnterButton(QPushButton):
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Return:
             self.func()
+        else:
+            super().keyPressEvent(e)
 
 
 class ThreadedButton(QPushButton):
@@ -203,7 +199,8 @@ class MessageBoxMixin:
 
     def question(self, msg, parent=None, title=None, icon=None, defaultButton=QMessageBox.No, **kwargs):
         Yes, No = QMessageBox.Yes, QMessageBox.No
-        retval = self.msg_box(icon or QMessageBox.Question,
+        if icon is None: icon = QMessageBox.Question
+        retval = self.msg_box(icon,
                               parent, title or '',
                               msg, buttons=Yes|No, defaultButton=defaultButton, **kwargs)
         if isinstance(retval, (list, tuple)):
@@ -218,19 +215,27 @@ class MessageBoxMixin:
         return retval
 
     def show_warning(self, msg, parent=None, title=None, **kwargs):
-        return self.msg_box(QMessageBox.Warning, parent,
+        icon = kwargs.pop('icon', None)  # may be 0
+        if icon is None: icon = QMessageBox.Warning
+        return self.msg_box(icon, parent,
                             title or _('Warning'), msg, **kwargs)
 
     def show_error(self, msg, parent=None, title=None, **kwargs):
-        return self.msg_box(QMessageBox.Warning, parent,
+        icon = kwargs.pop('icon', None)  # may be 0
+        if icon is None: icon = QMessageBox.Warning
+        return self.msg_box(icon, parent,
                             title or _('Error'), msg, **kwargs)
 
     def show_critical(self, msg, parent=None, title=None, **kwargs):
-        return self.msg_box(QMessageBox.Critical, parent,
+        icon = kwargs.pop('icon', None)  # may be 0
+        if icon is None: icon = QMessageBox.Critical
+        return self.msg_box(icon, parent,
                             title or _('Critical Error'), msg, **kwargs)
 
     def show_message(self, msg, parent=None, title=None, **kwargs):
-        return self.msg_box(QMessageBox.Information, parent,
+        icon = kwargs.pop('icon', None)  # may be 0
+        if icon is None: icon = QMessageBox.Information
+        return self.msg_box(icon, parent,
                             title or _('Information'), msg, **kwargs)
 
     def msg_box(self, icon, parent, title, text,
@@ -289,13 +294,20 @@ class MessageBoxMixin:
         if checkbox_text and isinstance(checkbox_text, str):
             chk = QCheckBox(checkbox_text)
             d.setCheckBox(chk)
+            def on_chk(b):
+                nonlocal checkbox_ischecked
+                checkbox_ischecked = bool(b)
             chk.setChecked(bool(checkbox_ischecked))
-            d.exec_()
-            ret = d.result(), chk.isChecked() # new API returns a tuple if a checkbox is specified
+            chk.clicked.connect(on_chk)
+            res = d.exec_()
+            ret = res, checkbox_ischecked # new API returns a tuple if a checkbox is specified
         else:
-            d.exec_()
-            ret = d.result() # old/no checkbox api
-        d.setParent(None) # Force GC sooner rather than later.
+            ret = d.exec_() # old/no checkbox api
+        try:
+            d.setParent(None) # Force GC sooner rather than later.
+        except RuntimeError as e:
+            # C++ object deleted -- can happen with misbehaving client code that kills parent from dialog ok
+            print_error("MsgBoxMixin WARNING: client code is killing the dialog box's parent before function return:", str(e))
         return ret
 
 class QMessageBoxMixin(QMessageBox, MessageBoxMixin):
@@ -333,8 +345,12 @@ class WaitingDialog(WindowModalDialog):
     Note if disable_escape_key is not set, user can hit cancel to prematurely
     close the dialog. Sometimes this is desirable, and sometimes it isn't, hence
     why the option is offered.'''
+
+    _update_progress_sig = pyqtSignal(int)
+
     def __init__(self, parent, message, task, on_success=None, on_error=None, auto_cleanup=True,
-                 *, auto_show=True, auto_exec=False, title=None, disable_escape_key=False):
+                 *, auto_show=True, auto_exec=False, title=None, disable_escape_key=False,
+                 progress_bar=None, progress_min=0, progress_max=0):
         assert parent
         if isinstance(parent, MessageBoxMixin):
             parent = parent.top_level_window()
@@ -346,6 +362,15 @@ class WaitingDialog(WindowModalDialog):
         vbox.addWidget(label)
         self.accepted.connect(self.on_accepted)
         self.rejected.connect(self.on_rejected)
+        self._pbar = None
+        if progress_bar:
+            self._pbar = p =QProgressBar()
+            p.setMinimum(progress_min)
+            p.setMaximum(progress_max)
+            if isinstance(progress_bar, str):
+                p.setTitle(progress_bar)
+            self._update_progress_sig.connect(p.setValue)
+            vbox.addWidget(p)
         if auto_show and not auto_exec:
             self.open()
         self.thread = TaskThread(self)
@@ -356,6 +381,16 @@ class WaitingDialog(WindowModalDialog):
 
     def wait(self):
         self.thread.wait()
+
+    def update_progress(self, progress: int):
+        if not self._pbar:
+            return
+        try:
+            progress = int(progress)
+        except (ValueError, TypeError):
+            return
+        else:
+            self._update_progress_sig.emit(progress)
 
     def on_accepted(self):
         self.thread.stop()
@@ -479,15 +514,15 @@ def address_combo(addresses):
     return hbox, addr_combo
 
 
-def filename_field(parent, config, defaultname, select_msg):
+def filename_field(config, defaultname, select_msg):
 
+    gb = QGroupBox(_("Format"))
     vbox = QVBoxLayout()
-    vbox.addWidget(QLabel(_("Format")))
-    gb = QGroupBox("format", parent)
-    b1 = QRadioButton(gb)
+    gb.setLayout(vbox)
+    b1 = QRadioButton()
     b1.setText(_("CSV"))
     b1.setChecked(True)
-    b2 = QRadioButton(gb)
+    b2 = QRadioButton()
     b2.setText(_("JSON"))
     vbox.addWidget(b1)
     vbox.addWidget(b2)
@@ -520,7 +555,7 @@ def filename_field(parent, config, defaultname, select_msg):
     b1.clicked.connect(lambda: set_csv(True))
     b2.clicked.connect(lambda: set_csv(False))
 
-    return vbox, filename_e, b1
+    return gb, filename_e, b1
 
 class ElectrumItemDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
@@ -531,14 +566,28 @@ class MyTreeWidget(QTreeWidget):
     class SortSpec(namedtuple("SortSpec", "column, qt_sort_order")):
         ''' Used to specify member: default_sort '''
 
-    # Specify this in subclasses to apply a default sort order to the widget
+    # Specify this in subclasses to apply a default sort order to the widget.
     # If None, nothing is applied (items are presented in the order they are
     # added).
     default_sort : SortSpec = None
 
     # Specify this in subclasses to enable substring search/filtering (Ctrl+F)
-    # (if empty, no search is applied)
+    # (if this and filter_data_columns are both empty, no search is applied)
     filter_columns = []
+    # Like the above but rather than search the item .text() field, it searches
+    # for *data* in columns, e.g. item.data(col, Qt.UserRole). The data must
+    # live in filter_data_role (Qt.UserRole by default) in the specified
+    # column(s) and be a str. Leave empty to disable this facility. Note that
+    # data matches for the Ctrl+F filter must be a full string match (no
+    # substring matching is done) -- this is in contrast to filter_columns
+    # matching above which does substring matching. This reason we match on full
+    # strings is this facility was initially added to allow for searching the
+    # history_list by txid. If this criterion doesn't suit your use-case when
+    # inheriting from this, you may always override this class's `filter`
+    # method.
+    filter_data_columns = []
+    # the QTreeWidgetItem data role to use when searching data columns
+    filter_data_role : int = Qt.UserRole
 
     def __init__(self, parent, create_menu, headers, stretch_column=None,
                  editable_columns=None,
@@ -615,7 +664,7 @@ class MyTreeWidget(QTreeWidget):
             if item and col > -1:
                 self.on_activated(item, col)
         else:
-            QTreeWidget.keyPressEvent(self, event)
+            super().keyPressEvent(event)
 
     def permit_edit(self, item, column):
         return (column in self.editable_columns
@@ -732,13 +781,29 @@ class MyTreeWidget(QTreeWidget):
 
     def filter(self, p):
         columns = self.__class__.filter_columns
-        if not columns:
+        data_columns = self.__class__.filter_data_columns
+        if not columns and not data_columns:
             return
         p = p.lower()
         self.current_filter = p
+        bad_data_column = False
+        data_role = self.__class__.filter_data_role
         for item in self.get_leaves(self.invisibleRootItem()):
-            item.setHidden(all([item.text(column).lower().find(p) == -1
-                                for column in columns]))
+            no_match_text = all(item.text(column).lower().find(p) == -1
+                                for column in columns)
+            no_match_data = True
+            if no_match_text and not bad_data_column and data_columns:
+                try:
+                    # data matching is different -- it must match exactly the
+                    # specified search string. This was originally designed
+                    # to allow for tx-hash searching of the history list.
+                    no_match_data = all(item.data(column, data_role).strip().lower() != p
+                                        for column in data_columns)
+                except (AttributeError, TypeError, ValueError):
+                    # flag so we don't keep raising for each iteration of this
+                    # loop.  Programmer error here in subclass, silently ignore.
+                    bad_data_column = True
+            item.setHidden(no_match_text and no_match_data)
 
 
 class OverlayControlMixin:
@@ -751,18 +816,36 @@ class OverlayControlMixin:
     QPushButton:hover { border: 1px solid #3daee9; }
     '''
 
+    STYLE_SHEET_MAC = '''
+    QPushButton { border-width: 1px; padding: 0px; margin: 2px; }
+    QPushButton { border: 1px solid transparent; }
+    QPushButton:hover { border: 1px solid #3daee9; }
+    '''
+
     def __init__(self, middle: bool = False):
         assert isinstance(self, QWidget)
         self.middle = middle
         self.overlay_widget = QWidget(self)
-        style_sheet = self.STYLE_SHEET_COMMON
-        if not ColorScheme.dark_scheme:
-            style_sheet = style_sheet + self.STYLE_SHEET_LIGHT
-        self.overlay_widget.setStyleSheet(style_sheet)
+        self._updateSverlayStyleSheet()
         self.overlay_layout = QHBoxLayout(self.overlay_widget)
         self.overlay_layout.setContentsMargins(0, 0, 0, 0)
         self.overlay_layout.setSpacing(1)
         self._updateOverlayPos()
+
+    def _updateSverlayStyleSheet(self):
+        if sys.platform in ('darwin',):
+            # On Mac, in Mojave dark mode, we get some strange button spacing
+            # if we use the regular common sheet, so we must use a custom sheet.
+            style_sheet = self.STYLE_SHEET_MAC
+        else:
+            style_sheet = self.STYLE_SHEET_COMMON
+            if not ColorScheme.dark_scheme:
+                style_sheet = style_sheet + self.STYLE_SHEET_LIGHT
+        self.overlay_widget.setStyleSheet(style_sheet)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._updateSverlayStyleSheet()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -920,32 +1003,56 @@ class ColorSchemeItem:
         color = self._get_color(background)
         return QColor(color)
 
+    def get_html(self, background=False):
+        return self._get_color(background)
 
-class ColorScheme:
-    dark_scheme = False
 
-    GREEN = ColorSchemeItem("#117c11", "#8af296")
-    SLPGREEN = ColorSchemeItem("#25863f", "#8af296") # darker alternative: ColorSchemeItem("#25863f", "#60bc70")
-    YELLOW = ColorSchemeItem("#897b2a", "#ffff00")
-    PINK = ColorSchemeItem("#9c4444", "#ffbaba")
-    RED = ColorSchemeItem("#7c1111", "#f18c8c")
-    BLUE = ColorSchemeItem("#123b7c", "#8cb3f2")
-    DEFAULT = ColorSchemeItem("black", "white")
-    if sys.platform.startswith("win"):
-        GRAY = ColorSchemeItem("#6a6864", "#a0a0a4")  # darkGray, gray
-    else:
-        GRAY = ColorSchemeItem("#777777", "#a0a0a4")  # darkGray, gray
+class _ColorScheme:
+    def __init__(self):
+        self._dark_scheme = False
 
-    @staticmethod
-    def has_dark_background(widget):
+        from .utils import darkdetect
+        self._dark_detector = darkdetect.isDark
+
+        self.DEEPGREEN = ColorSchemeItem("#335c33", "#7ac276")
+        self.GREEN = ColorSchemeItem("#117c11", "#8af296")
+        self.SLPGREEN = ColorSchemeItem("#25863f", "#8af296") # darker alternative: ColorSchemeItem("#25863f", "#60bc70")
+        self.YELLOW = ColorSchemeItem("#897b2a", "#ffff00")
+        self.PINK = ColorSchemeItem("#9c4444", "#ffbaba")
+        self.RED = ColorSchemeItem("#7c1111", "#f18c8c")
+        self.BLUE = ColorSchemeItem("#123b7c", "#8cb3f2")
+        self.DEFAULT = ColorSchemeItem("black", "white")
+        if sys.platform.startswith("win"):
+            self.GRAY = ColorSchemeItem("#6a6864", "#a0a0a4")  # darkGray, gray
+        else:
+            self.GRAY = ColorSchemeItem("#777777", "#a0a0a4")  # darkGray, gray
+
+    def has_dark_background(self, widget):
         brightness = sum(widget.palette().color(QPalette.Background).getRgb()[0:3])
         return brightness < (255*3/2)
 
-    @staticmethod
-    def update_from_widget(widget, *, force_dark=False):
-        if force_dark or ColorScheme.has_dark_background(widget):
-            ColorScheme.dark_scheme = True
+    def update_from_widget(self, widget, *, force_dark=False):
+        self.dark_scheme = bool(force_dark or self.has_dark_background(widget))
 
+    @property
+    def dark_scheme(self):
+        '''Getter. We rely on the _dark_detector function. If it returns None
+        we know the _dark_detector is invalid so we just use the cached
+        setting.'''
+        detected = self._dark_detector()
+        if detected is not None:
+            return detected
+        else:
+            return self._dark_scheme
+
+    @dark_scheme.setter
+    def dark_scheme(self, b):
+        '''Note that the setter may not actually take effect if using the
+        system-specific dark detector (MacOS Mojave+ only).'''
+        self._dark_scheme = b
+
+
+ColorScheme = _ColorScheme()
 
 class SortableTreeWidgetItem(QTreeWidgetItem):
     DataRole = Qt.UserRole + 1

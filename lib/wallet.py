@@ -40,14 +40,15 @@ from collections import defaultdict
 from functools import partial
 
 from .i18n import ngettext
-from .util import NotEnoughFunds, ExcessiveFee, PrintError, UserCancelled, profiler, format_satoshis, format_time, finalization_print_error
+from .util import NotEnoughFunds, ExcessiveFee, PrintError, UserCancelled, profiler, format_satoshis, format_time, finalization_print_error, to_string
 
 from .address import Address, Script, ScriptOutput, PublicKey, OpCodes
 from .bitcoin import *
 from .version import *
 from .keystore import load_keystore, Hardware_KeyStore, Imported_KeyStore, BIP32_KeyStore, xpubkey_to_address
 from . import networks
-from .storage import multisig_type
+from . import keystore
+from .storage import multisig_type, WalletStorage
 
 from . import transaction
 from .transaction import Transaction, InputValueMissing
@@ -62,8 +63,7 @@ from .blockchain import NULL_HASH_HEX
 
 
 from . import paymentrequest
-from .paymentrequest import PR_PAID, PR_UNPAID, PR_UNKNOWN, PR_EXPIRED
-from .paymentrequest import InvoiceStore
+from .paymentrequest import InvoiceStore, PR_PAID, PR_UNPAID, PR_UNKNOWN, PR_EXPIRED
 from .contacts import Contacts
 from . import cashacct
 from . import slp
@@ -185,6 +185,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         # verifier (SPV) and synchronizer are started in start_threads
         self.synchronizer = None
         self.verifier = None
+        self.weak_window = None  # Some of the GUI classes, such as the Qt ElectrumWindow, use this to refer back to themselves.  This should always be a weakref.ref (Weak.ref), or None
         # CashAccounts subsystem. Its network-dependent layer is started in
         # start_threads. Note: object instantiation should be lightweight here.
         # self.cashacct.load() is called later in this function to load data.
@@ -225,6 +226,8 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         # The two types of freezing are flagged independently of each other and 'spendable' is defined as a coin that satisfies
         # BOTH levels of freezing.
         self.frozen_coins = set(storage.get('frozen_coins', []))
+        self.frozen_coins_tmp = set()  # in-memory only
+
         # address -> list(txid, height)
         history = storage.get('addr_history',{})
         self._history = self.to_Address_dict(history)
@@ -270,7 +273,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         self.slp.load()  # try to load first so we can pick up the remove_transaction hook from load_transactions if need be
 
         # Now, finally, after object is constructed -- we can do this
-        self.load_keystore()
+        self.load_keystore_wrapper()
         self.load_addresses()
         self.load_transactions()
         self.build_reverse_history()
@@ -304,6 +307,74 @@ class Abstract_Wallet(PrintError, SPVDelegate):
 
     def get_master_public_key(self):
         return None
+
+    def load_keystore_wrapper(self):
+        """ Loads the keystore, but also tries to preserve derivation(s). Older
+        Electron Cash versions would not save the derivation for all keystore
+        types. So this function ensures:
+
+        1. That on first run, we store the keystore_derivations to top-level
+           storage (which is preserved always).
+        2. On subsequent runs we try and load the keystore_derivations from
+           storage and restore them if the individual keystore.derivation data
+           items were lost (because user loaded wallet with older Electron
+           Cash).
+
+        This function is provided to allow users to switch between old and new
+        EC versions.  In the future if we deprecate the wallet format, or if
+        enough time has passed, this function may be removed and the simple
+        self.load_keystore() may be used instead. """
+        self.load_keystore()
+        if not hasattr(self, 'get_keystores'):
+            return
+        from .keystore import Deterministic_KeyStore, Old_KeyStore
+        keystores = self.get_keystores()
+        keystore_derivations = self.storage.get('keystore_derivations', [])
+        if len(keystore_derivations) != len(keystores):
+            keystore_derivations = [None] * len(keystores)
+        updated, updated_ks, updated_st = False, False, False
+        for i, keystore in enumerate(keystores):
+            if i == 0 and isinstance(keystore, Deterministic_KeyStore) and not keystore.seed_type:
+                # Attempt to update keystore.seed_type
+                if isinstance(keystore, Old_KeyStore):
+                    keystore.seed_type = 'old'
+                    updated_st = True
+                else:
+                    # attempt to restore the seed_type based on wallet saved "seed_type"
+                    typ = self.storage.get('seed_type')
+                    if typ in ('standard', 'electrum'):
+                        keystore.seed_type = 'electrum'
+                        updated_st = True
+                    elif typ == 'bip39':
+                        keystore.seed_type = 'bip39'
+                        updated_st = True
+            saved_der = keystore_derivations[i]
+            der = (keystore.has_derivation() and keystore.derivation) or None
+            if der != saved_der:
+                if der:
+                    # keystore had a derivation, but top-level storage did not
+                    # (this branch is typically taken on first run after
+                    # restoring from seed or creating a new wallet)
+                    keystore_derivations[i] = saved_der = der
+                    updated = True
+                elif saved_der:
+                    # we had a derivation but keystore did not. This branch is
+                    # taken if the user has loaded this wallet with an older
+                    # version of Electron Cash. Attempt to restore their
+                    # derivation item in keystore.
+                    keystore.derivation = der  # write to keystore
+                    updated_ks = True  # tell it to re-save
+        if updated:
+            self.print_error("Updated keystore_derivations")
+            self.storage.put('keystore_derivations', keystore_derivations)
+        if updated_ks or updated_st:
+            if updated_ks:
+                self.print_error("Updated keystore (lost derivations restored)")
+            if updated_st:
+                self.print_error("Updated keystore (lost seed_type restored)")
+            self.save_keystore()
+        if any((updated, updated_ks, updated_st)):
+            self.storage.write()
 
     @profiler
     def load_transactions(self):
@@ -795,6 +866,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             coins.pop(txi)
             # cleanup/detect if the 'frozen coin' was spent and remove it from the frozen coin set
             self.frozen_coins.discard(txi)
+            self.frozen_coins_tmp.discard(txi)
         out = {}
         for txo, v in coins.items():
             tx_height, value, is_cb = v
@@ -806,7 +878,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
                 'prevout_hash':prevout_hash,
                 'height':tx_height,
                 'coinbase':is_cb,
-                'is_frozen_coin':txo in self.frozen_coins,
+                'is_frozen_coin':txo in self.frozen_coins or txo in self.frozen_coins_tmp,
                 'slp_token':self.slp.token_info_for_txo(txo),  # (token_id_hex, qty) tuple or None
             }
             out[txo] = x
@@ -832,7 +904,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         c = u = x = 0
         had_cb = False
         for txo, (tx_height, v, is_cb) in received.items():
-            if exclude_frozen_coins and txo in self.frozen_coins:
+            if exclude_frozen_coins and (txo in self.frozen_coins or txo in self.frozen_coins_tmp):
                 continue
             had_cb = had_cb or is_cb  # remember if this address has ever seen a coinbase txo
             if is_cb and tx_height + COINBASE_MATURITY > mempoolHeight:
@@ -940,7 +1012,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         return []
 
     def get_frozen_balance(self):
-        if not self.frozen_coins:
+        if not self.frozen_coins and not self.frozen_coins_tmp:
             # performance short-cut -- get the balance of the frozen address set only IFF we don't have any frozen coins
             return self.get_balance(self.frozen_addresses)
         # otherwise, do this more costly calculation...
@@ -1309,6 +1381,12 @@ class Abstract_Wallet(PrintError, SPVDelegate):
     def receive_tx_callback(self, tx_hash, tx, tx_height):
         self.add_transaction(tx_hash, tx)
         self.add_unverified_tx(tx_hash, tx_height)
+        if self.network and self.network.callback_listener_count("payment_received") > 0:
+            for _, addr, _ in tx.outputs():
+                status = self.get_request_status(addr)  # returns PR_UNKNOWN quickly if addr has no requests, otherwise returns tuple
+                if status != PR_UNKNOWN:
+                    status = status[0]  # unpack status from tuple
+                    self.network.trigger_callback('payment_received', self, addr, status)
 
     def receive_history_callback(self, addr, hist, tx_fees):
         with self.lock:
@@ -1388,29 +1466,45 @@ class Abstract_Wallet(PrintError, SPVDelegate):
 
     def export_history(self, domain=None, from_timestamp=None, to_timestamp=None, fx=None,
                        show_addresses=False, decimal_point=8,
-                       *, fee_calc_timeout=0.250):
-        ''' Export history. Used by RPC but also GUI.
+                       *, fee_calc_timeout=10.0, download_inputs=False,
+                       progress_callback=None):
+        ''' Export history. Used by RPC & GUI.
 
-        Arg notes: `fee_calc_timeout` is used when computing the fee (which is
-        done asynchronously in another thread), to limit the amount of time in
-        seconds spent per tx to calculate the fee. The reason the fee calc can
-        take a long time is for some pathological tx's, it is very slow to
-        calculate fee as it involves deserializing prevout_tx from the wallet,
-        for each input.
+        Arg notes:
+        - `fee_calc_timeout` is used when computing the fee (which is done
+          asynchronously in another thread) to limit the total amount of time in
+          seconds spent waiting for fee calculation. The timeout is a total time
+          allotment for this function call. (The reason the fee calc can take a
+          long time is for some pathological tx's, it is very slow to calculate
+          fee as it involves deserializing prevout_tx from the wallet, for each
+          input).
+        - `download_inputs`, if True, will allow for more accurate fee data to
+          be exported with the history by using the Transaction class input
+          fetcher to download *all* prevout_hash tx's for inputs (even for
+          inputs not in wallet). This feature requires self.network (ie, we need
+          to be online) otherwise it will behave as if download_inputs=False.
+        - `progress_callback`, if specified, is a callback which receives a
+          single float argument in the range [0.0,1.0] indicating how far along
+          the history export is going. This is intended for interop with GUI
+          code. Node the progress callback is not guaranteed to be called in the
+          context of the main thread, therefore GUI code should use appropriate
+          signals/slots to update the GUI with progress info.
 
-        Note on side effects: This function will try very hard to calculate fees
-        by examining prevout_tx's (leveraging the fetch_input_data code in the
-        Transaction class). A side effect is that it will cache fees it sees in
-        the wallet, but it won't go out to the network -- it only calculates
-        fees if the tx was either coinbase or all its prevouts are known to the
-        wallet. It will then update self.tx_fees with the new information as a
-        side-effect. '''
+        Note on side effects: This function may update self.tx_fees. Rationale:
+        it will spend some time trying very hard to calculate accurate fees by
+        examining prevout_tx's (leveraging the fetch_input_data code in the
+        Transaction class). As such, it is worthwhile to cache the results in
+        self.tx_fees, which gets saved to wallet storage. This is not very
+        demanding on storage as even for very large wallets with huge histories,
+        tx_fees does not use more than a few hundred kb of space. '''
         from .util import timestamp_to_datetime
         # we save copies of tx's we deserialize to this temp dict because we do
         # *not* want to deserialize tx's in wallet.transactoins since that
         # wastes memory
         local_tx_cache = {}
         # some helpers for this function
+        t0 = time.time()
+        def time_remaining(): return max(fee_calc_timeout - (time.time()-t0), 0)
         class MissingTx(RuntimeError):
             ''' Can happen in rare circumstances if wallet history is being
             radically reorged by network thread while we are in this code. '''
@@ -1449,18 +1543,19 @@ class Abstract_Wallet(PrintError, SPVDelegate):
                     try: return tx.get_fee()
                     except InputValueMissing: pass
                 fee = try_get_fee(tx)
-                if fee is None:
+                t_remain = time_remaining()
+                if fee is None and t_remain:
                     q = queue.Queue()
                     def done():
                         q.put(1)
-                    tx.fetch_input_data(self, use_network=False, done_callback=done)
-                    try: q.get(timeout=fee_calc_timeout)
+                    tx.fetch_input_data(self, use_network=bool(download_inputs), done_callback=done)
+                    try: q.get(timeout=t_remain)
                     except queue.Empty: pass
                     fee = try_get_fee(tx)
                 return fee
             fee = do_get_fee(tx_hash)
             if fee is not None:
-                self.tx_fees[tx_hash] = fee  # save fee to wallet
+                self.tx_fees[tx_hash] = fee  # save fee to wallet if we bothered to dl/calculate it.
             return fee
         def fmt_amt(v, is_diff):
             if v is None:
@@ -1472,7 +1567,11 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         h = self.get_history(domain, reverse=True)
         out = []
 
+        n, l = 0, max(1, float(len(h)))
         for tx_hash, height, conf, timestamp, value, balance in h:
+            if progress_callback:
+                progress_callback(n/l)
+            n += 1
             timestamp_safe = timestamp
             if timestamp is None:
                 timestamp_safe = time.time()  # set it to "now" so below code doesn't explode.
@@ -1524,12 +1623,15 @@ class Abstract_Wallet(PrintError, SPVDelegate):
                 date = timestamp_to_datetime(timestamp_safe)
                 item['fiat_value'] = fx.historical_value_str(value, date)
                 item['fiat_balance'] = fx.historical_value_str(balance, date)
+                item['fiat_fee'] = fx.historical_value_str(fee, date)
             out.append(item)
+        if progress_callback:
+            progress_callback(1.0)  # indicate done, just in case client code expects a 1.0 in order to detect completion
         return out
 
     def get_label(self, tx_hash):
         label = self.labels.get(tx_hash, '')
-        if label is '':
+        if not label:
             label = self.get_default_label(tx_hash)
         return label
 
@@ -1681,26 +1783,31 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         return tx
 
     def is_frozen(self, addr):
-        ''' Address-level frozen query. Note: this is set/unset independent of 'coin' level freezing. '''
+        ''' Address-level frozen query. Note: this is set/unset independent of
+        'coin' level freezing. '''
         assert isinstance(addr, Address)
         return addr in self.frozen_addresses
 
     def is_frozen_coin(self, utxo):
-        ''' 'coin' level frozen query. `utxo' is a prevout:n string, or a dict as returned from get_utxos().
-            Note: this is set/unset independent of 'address' level freezing. '''
+        ''' 'coin' level frozen query. `utxo' is a prevout:n string, or a dict
+        as returned from get_utxos(). Note: this is set/unset independent of
+        'address' level freezing. '''
         assert isinstance(utxo, (str, dict))
         if isinstance(utxo, dict):
-            ret = ("{}:{}".format(utxo['prevout_hash'], utxo['prevout_n'])) in self.frozen_coins
+            name = ("{}:{}".format(utxo['prevout_hash'], utxo['prevout_n']))
+            ret = name in self.frozen_coins or name in self.frozen_coins_tmp
             if ret != utxo['is_frozen_coin']:
-                self.print_error("*** WARNING: utxo has stale is_frozen_coin flag")
+                self.print_error("*** WARNING: utxo has stale is_frozen_coin flag", name)
                 utxo['is_frozen_coin'] = ret # update stale flag
             return ret
-        return utxo in self.frozen_coins
+        else:
+            return utxo in self.frozen_coins or utxo in self.frozen_coins_tmp
 
     def set_frozen_state(self, addrs, freeze):
-        ''' Set frozen state of the addresses to FREEZE, True or False
-            Note that address-level freezing is set/unset independent of coin-level freezing, however both must
-            be satisfied for a coin to be defined as spendable.. '''
+        ''' Set frozen state of the addresses to `freeze`, True or False. Note
+        that address-level freezing is set/unset independent of coin-level
+        freezing, however both must be satisfied for a coin to be defined as
+        spendable. '''
         if all(self.is_mine(addr) for addr in addrs):
             if freeze:
                 self.frozen_addresses |= set(addrs)
@@ -1712,30 +1819,47 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             return True
         return False
 
-    def set_frozen_coin_state(self, utxos, freeze):
-        ''' Set frozen state of the COINS to FREEZE, True or False.
-            utxos is a (possibly mixed) list of either "prevout:n" strings and/or coin-dicts as returned from get_utxos().
-            Note that if passing prevout:n strings as input, 'is_mine()' status is not checked for the specified coin.
-            Also note that coin-level freezing is set/unset independent of address-level freezing, however both must
-            be satisfied for a coin to be defined as spendable. '''
+    def set_frozen_coin_state(self, utxos, freeze, *, temporary = False):
+        '''Set frozen state of the `utxos` to `freeze`, True or False. `utxos`
+        is a (possibly mixed) list of either "prevout:n" strings and/or
+        coin-dicts as returned from get_utxos(). Note that if passing prevout:n
+        strings as input, 'is_mine()' status is not checked for the specified
+        coin. Also note that coin-level freezing is set/unset independent of
+        address-level freezing, however both must be satisfied for a coin to be
+        defined as spendable.
+
+        The `temporary` flag only applies if `freeze = True`. In that case,
+        freezing coins will only affect the in-memory-only frozen set, which
+        doesn't get saved to storage. This mechanism was added so that plugins
+        (such as CashFusion) have a mechanism for ephemeral coin freezing that
+        doesn't persist across sessions.
+
+        Note that setting `freeze = False` effectively unfreezes both the
+        temporary and the permanent frozen coin sets all in 1 call. Thus after a
+        call to `set_frozen_coin_state(utxos, False), both the temporary and the
+        persistent frozen sets are cleared of all coins in `utxos`. '''
+        add_set = self.frozen_coins if not temporary else self.frozen_coins_tmp
+        def add(utxo):
+            add_set.add( utxo )
+        def discard(utxo):
+            self.frozen_coins.discard( utxo )
+            self.frozen_coins_tmp.discard( utxo )
+        apply_operation = add if freeze else discard
+        original_size = len(self.frozen_coins)
         with self.lock:
             ok = 0
             for utxo in utxos:
                 if isinstance(utxo, str):
-                    if freeze:
-                        self.frozen_coins.add( utxo )
-                    else:
-                        self.frozen_coins.discard( utxo )
+                    apply_operation( utxo )
                     ok += 1
                 elif isinstance(utxo, dict) and self.is_mine(utxo['address']):
                     txo = "{}:{}".format(utxo['prevout_hash'], utxo['prevout_n'])
-                    if freeze:
-                        self.frozen_coins.add( txo )
-                    else:
-                        self.frozen_coins.discard( txo )
+                    apply_operation( txo )
                     utxo['is_frozen_coin'] = bool(freeze)
                     ok += 1
-            if ok:
+            if original_size != len(self.frozen_coins):
+                # Performance optimization: only set storage if the perma-set
+                # changed.
                 self.storage.put('frozen_coins', list(self.frozen_coins))
             return ok
 
@@ -1946,7 +2070,17 @@ class Abstract_Wallet(PrintError, SPVDelegate):
                 info[addr] = index, sorted_xpubs, self.m if isinstance(self, Multisig_Wallet) else None, self.txin_type
         tx.output_info = info
 
-    def sign_transaction(self, tx, password):
+    def sign_transaction(self, tx, password, *, use_cache=False):
+        """ Sign a transaction, requires password (may be None for password-less
+        wallets). If `use_cache` is enabled then signing will be much faster.
+
+        For transactions with N inputs and M outputs, calculating all sighashes
+        takes only O(N + M) with the cache, as opposed to O(N^2 + NM) without
+        the cache.
+
+        Warning: If you modify non-signature parts of the transaction
+        afterwards, do not use `use_cache`! """
+
         if self.is_watching_only():
             return
         # add input values for signing
@@ -1958,7 +2092,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         for k in self.get_keystores():
             try:
                 if k.can_sign(tx):
-                    k.sign_transaction(tx, password)
+                    k.sign_transaction(tx, password, use_cache=use_cache)
             except UserCancelled:
                 continue
 
@@ -2066,13 +2200,10 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             expiration = 0
         conf = None
         if amount:
-            if self.up_to_date:
-                paid, conf = self.get_payment_status(address, amount)
-                status = PR_PAID if paid else PR_UNPAID
-                if status == PR_UNPAID and expiration is not None and time.time() > timestamp + expiration:
-                    status = PR_EXPIRED
-            else:
-                status = PR_UNKNOWN
+            paid, conf = self.get_payment_status(address, amount)
+            status = PR_PAID if paid else PR_UNPAID
+            if status == PR_UNPAID and expiration is not None and time.time() > timestamp + expiration:
+                status = PR_EXPIRED
         else:
             status = PR_UNKNOWN
         return status, conf
@@ -2122,7 +2253,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         alias_privkey = self.export_private_key(alias_addr, password)
         pr = paymentrequest.make_unsigned_request(req)
         paymentrequest.sign_request_with_alias(pr, alias, alias_privkey)
-        req['name'] = pr.pki_data
+        req['name'] = to_string(pr.pki_data)
         req['sig'] = bh2u(pr.signature)
         self.receive_requests[key] = req
         self.save_payment_requests()
@@ -2360,7 +2491,7 @@ class ImportedWalletBase(Simple_Wallet):
         return self.txin_type
 
     def can_delete_address(self):
-        return True
+        return len(self.get_addresses()) > 1  # Cannot delete the last address
 
     def has_seed(self):
         return False
@@ -2385,8 +2516,10 @@ class ImportedWalletBase(Simple_Wallet):
 
     def delete_address(self, address):
         assert isinstance(address, Address)
-        if address not in self.get_addresses():
+        all_addrs = self.get_addresses()
+        if len(all_addrs) <= 1 or address not in all_addrs:
             return
+        del all_addrs
 
         transactions_to_remove = set()  # only referred to by this address
         transactions_new = set()  # txs that are not only referred to by address
@@ -2875,7 +3008,7 @@ class UnknownWalletType(RuntimeError):
     pass
 
 # former WalletFactory
-class Wallet(object):
+class Wallet:
     """The main wallet "entry point".
     This class is actually a factory that will return a wallet of the correct
     type when passed a WalletStorage instance."""
@@ -2901,3 +3034,73 @@ class Wallet(object):
         if wallet_type in wallet_constructors:
             return wallet_constructors[wallet_type]
         raise UnknownWalletType("Unknown wallet type: " + str(wallet_type))
+
+
+def create_new_wallet(*, path, config, passphrase=None, password=None,
+                      encrypt_file=True, seed_type=None, gap_limit=None) -> dict:
+    """Create a new wallet"""
+    storage = WalletStorage(path)
+    if storage.file_exists():
+        raise Exception("Remove the existing wallet first!")
+
+    from .mnemonic import Mnemonic_Electrum, Mnemonic
+    if seed_type == 'electrum':
+        seed = Mnemonic_Electrum('en').make_seed()
+    else:
+        seed = Mnemonic('en').make_seed()
+    k = keystore.from_seed(seed, passphrase, seed_type = seed_type)
+    storage.put('keystore', k.dump())
+    storage.put('wallet_type', 'standard')
+    storage.put('seed_type', seed_type)
+    if gap_limit is not None:
+        storage.put('gap_limit', gap_limit)
+    wallet = Wallet(storage)
+    wallet.update_password(old_pw=None, new_pw=password, encrypt=encrypt_file)
+    wallet.synchronize()
+    msg = "Please keep your seed in a safe place; if you lose it, you will not be able to restore your wallet."
+
+    wallet.storage.write()
+    return {'seed': seed, 'wallet': wallet, 'msg': msg}
+
+
+def restore_wallet_from_text(text, *, path, config,
+                             passphrase=None, password=None, encrypt_file=True,
+                             gap_limit=None) -> dict:
+    """Restore a wallet from text. Text can be a seed phrase, a master
+    public key, a master private key, a list of bitcoin addresses
+    or bitcoin private keys."""
+    storage = WalletStorage(path)
+    if storage.file_exists():
+        raise Exception("Remove the existing wallet first!")
+
+    text = text.strip()
+    if keystore.is_address_list(text):
+        wallet = ImportedAddressWallet.from_text(storage, text)
+        wallet.save_addresses()
+    elif keystore.is_private_key_list(text,):
+        k = keystore.Imported_KeyStore({})
+        storage.put('keystore', k.dump())
+        wallet = ImportedPrivkeyWallet.from_text(storage, text, password)
+    else:
+        if keystore.is_master_key(text):
+            k = keystore.from_master_key(text)
+        elif keystore.is_seed(text):
+            k = keystore.from_seed(text, passphrase)  # auto-detects seed type, preference order: old, electrum, bip39
+        else:
+            raise Exception("Seed or key not recognized")
+        storage.put('keystore', k.dump())
+        storage.put('wallet_type', 'standard')
+        seed_type = getattr(k, 'seed_type', None)
+        if seed_type:
+            storage.put('seed_type', seed_type)  # Save, just in case
+        if gap_limit is not None:
+            storage.put('gap_limit', gap_limit)
+        wallet = Wallet(storage)
+
+    wallet.update_password(old_pw=None, new_pw=password, encrypt=encrypt_file)
+    wallet.synchronize()
+    msg = ("This wallet was restored offline. It may contain more addresses than displayed. "
+           "Start a daemon and use load_wallet to sync its history.")
+
+    wallet.storage.write()
+    return {'wallet': wallet, 'msg': msg}

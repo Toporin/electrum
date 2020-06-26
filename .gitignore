@@ -7,6 +7,7 @@ dist/
 /electrum.py
 contrib/pyinstaller/
 Electron_Cash.egg-info/
+locale/
 .devlocaltmp/
 *_trial_temp
 packages
@@ -30,3 +31,12 @@ xcuserdata/
 
 # IntelliJ Pycharm IDE
 /.idea
+# vs code
+.vscode/
+# mypy
+.mypy_cache/
+
+# Some people need to set up these symlinks to get their IDE completion working
+electroncash
+electroncash_gui
+electroncash_plugins

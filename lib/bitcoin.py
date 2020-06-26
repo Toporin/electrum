@@ -235,41 +235,6 @@ hash_encode = lambda x: bh2u(x[::-1])
 hash_decode = lambda x: bfh(x)[::-1]
 hmac_sha_512 = lambda x, y: hmac_oneshot(x, y, hashlib.sha512)
 
-
-def is_new_seed(x, prefix=version.SEED_PREFIX):
-    from . import mnemonic
-    x = mnemonic.normalize_text(x)
-    s = bh2u(hmac_sha_512(b"Seed version", x.encode('utf8')))
-    return s.startswith(prefix)
-
-
-def is_old_seed(seed):
-    from . import old_mnemonic, mnemonic
-    seed = mnemonic.normalize_text(seed)
-    words = seed.split()
-    try:
-        # checks here are deliberately left weak for legacy reasons, see #3149
-        old_mnemonic.mn_decode(words)
-        uses_electrum_words = True
-    except Exception:
-        uses_electrum_words = False
-    try:
-        seed = bfh(seed)
-        is_hex = (len(seed) == 16 or len(seed) == 32)
-    except Exception:
-        is_hex = False
-    return is_hex or (uses_electrum_words and (len(words) == 12 or len(words) == 24))
-
-
-def seed_type(x):
-    if is_old_seed(x):
-        return 'old'
-    elif is_new_seed(x):
-        return 'standard'
-    return ''
-
-is_seed = lambda x: bool(seed_type(x))
-
 # pywallet openssl private key implementation
 
 def i2o_ECPublicKey(pubkey, compressed=False):
@@ -360,8 +325,11 @@ def base_encode(v, base):
     if base == 43:
         chars = __b43chars
     long_value = 0
-    for (i, c) in enumerate(v[::-1]):
-        long_value += (256**i) * c
+    power_of_base = 1
+    for c in v[::-1]:
+        # naive but slow variant:   long_value += (256**i) * c
+        long_value += power_of_base * c
+        power_of_base <<= 8
     result = bytearray()
     while long_value >= base:
         div, mod = divmod(long_value, base)
@@ -391,11 +359,14 @@ def base_decode(v, length, base):
     if base == 43:
         chars = __b43chars
     long_value = 0
-    for (i, c) in enumerate(v[::-1]):
-        x = chars.find(bytes((c,)))
-        if x < 0:
-            raise ValueError(f"Invalid base{base} character '{str(c)}' at position {i}")
-        long_value +=  x * (base**i)
+    power_of_base = 1
+    for c in v[::-1]:
+        digit = chars.find(bytes((c,)))
+        if digit < 0:
+            raise ValueError("Forbidden character '{}' for base {}".format(chr(c), base))
+        # naive but slow variant:   long_value += digit * (base**i)
+        long_value += digit * power_of_base
+        power_of_base *= base
     result = bytearray()
     while long_value >= 256:
         div, mod = divmod(long_value, 256)
@@ -845,9 +816,14 @@ class InvalidXKeyFormat(InvalidXKey):
 class InvalidXKeyLength(InvalidXKey):
     pass
 
+class InvalidXKeyNotBase58(InvalidXKey):
+    pass
+
 def deserialize_xkey(xkey, prv, *, net=None):
     if net is None: net = networks.net
     xkey = DecodeBase58Check(xkey)
+    if xkey is None:
+        raise InvalidXKeyNotBase58('The supplied xkey is not encoded using base58')
     if len(xkey) != 78:
         raise InvalidXKeyLength('Invalid length')
     depth = xkey[4]
@@ -861,6 +837,15 @@ def deserialize_xkey(xkey, prv, *, net=None):
     xtype = list(headers.keys())[list(headers.values()).index(header)]
     n = 33 if prv else 32
     K_or_k = xkey[13+n:]
+    try:
+        # The below ensures we can actually derive nodes from this key,
+        # by first deriving node 0.  Fixes #1817.
+        if prv:
+            CKD_priv(K_or_k, c, 0)
+        else:
+            CKD_pub(K_or_k, c, 0)
+    except Exception as e:
+        raise InvalidXKey('Cannot derive from key') from e
     return xtype, depth, fingerprint, child_number, c, K_or_k
 
 

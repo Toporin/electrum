@@ -323,8 +323,8 @@ class AddressList(MyTreeWidget):
             if self.wallet.can_export():
                 menu.addAction(_("Private key"), lambda: self.parent.show_private_key(addr))
             if not is_multisig and not self.wallet.is_watching_only():
-                menu.addAction(_("Sign/verify message"), lambda: self.parent.sign_verify_message(addr))
-                menu.addAction(_("Encrypt/decrypt message"), lambda: self.parent.encrypt_message(addr))
+                menu.addAction(_("Sign/verify message") + "...", lambda: self.parent.sign_verify_message(addr))
+                menu.addAction(_("Encrypt/decrypt message") + "...", lambda: self.parent.encrypt_message(addr))
             if can_delete:
                 menu.addAction(_("Remove from wallet"), lambda: self.parent.remove_address(addr))
             addr_URL = web.BE_URL(self.config, 'addr', addr)
@@ -359,6 +359,8 @@ class AddressList(MyTreeWidget):
         if coins:
             menu.addAction(_("Spend from"),
                            partial(self.parent.spend_coins, coins))
+
+        run_hook('address_list_context_menu_setup', self, menu, addrs)
 
         # Add Cash Accounts section at the end, if relevant
         if not multi_select:

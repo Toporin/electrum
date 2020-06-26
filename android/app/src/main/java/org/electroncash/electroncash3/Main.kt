@@ -1,8 +1,10 @@
 package org.electroncash.electroncash3
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Bundle
 import android.text.Html
 import android.text.SpannableStringBuilder
@@ -12,15 +14,21 @@ import android.view.Menu
 import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.observe
 import com.chaquo.python.PyException
-import kotlinx.android.synthetic.main.change_password.*
 import kotlinx.android.synthetic.main.main.*
+import kotlinx.android.synthetic.main.password_change.*
+import kotlinx.android.synthetic.main.wallet_export.*
+import kotlinx.android.synthetic.main.wallet_open.*
+import kotlinx.android.synthetic.main.wallet_rename.*
+import java.io.File
 import kotlin.properties.Delegates.notNull
 import kotlin.reflect.KClass
 
@@ -34,7 +42,7 @@ val ACTIVITIES = HashMap<Int, KClass<out Activity>>().apply {
 
 // Bottom navigation
 val FRAGMENTS = HashMap<Int, KClass<out Fragment>>().apply {
-    put(R.id.navNoWallet, NoWalletFragment::class)
+    put(R.id.navNoWallet, WalletNotOpenFragment::class)
     put(R.id.navTransactions, TransactionsFragment::class)
     put(R.id.navRequests, RequestsFragment::class)
     put(R.id.navAddresses, AddressesFragment::class)
@@ -187,7 +195,7 @@ class MainActivity : AppCompatActivity(R.layout.main) {
         } else if (item.itemId == Menu.NONE) {
             val walletName = item.title.toString()
             if (walletName != daemonModel.walletName) {
-                showDialog(this, OpenWalletDialog().apply { arguments = Bundle().apply {
+                showDialog(this, WalletOpenDialog().apply { arguments = Bundle().apply {
                     putString("walletName", walletName)
                 }})
             }
@@ -223,10 +231,18 @@ class MainActivity : AppCompatActivity(R.layout.main) {
                 storage.callAttr("put", "use_change", item.isChecked)
                 storage.callAttr("write")
             }
-            R.id.menuChangePassword -> showDialog(this, ChangePasswordDialog())
-            R.id.menuShowSeed-> { showDialog(this, ShowSeedPasswordDialog()) }
-            R.id.menuDelete -> showDialog(this, DeleteWalletConfirmDialog())
-            R.id.menuClose -> showDialog(this, CloseWalletDialog())
+            R.id.menuChangePassword -> showDialog(this, PasswordChangeDialog())
+            R.id.menuShowSeed-> { showDialog(this, SeedPasswordDialog()) }
+            R.id.menuRename -> showDialog(this, WalletRenameDialog().apply {
+                arguments = Bundle().apply { putString("walletName", daemonModel.walletName) }
+            })
+            R.id.menuExport -> showDialog(this, WalletExportDialog().apply {
+                arguments = Bundle().apply { putString("walletName", daemonModel.walletName) }
+            })
+            R.id.menuDelete -> showDialog(this, WalletDeleteConfirmDialog().apply {
+                arguments = Bundle().apply { putString("walletName", daemonModel.walletName) }
+            })
+            R.id.menuClose -> showDialog(this, WalletCloseDialog())
             else -> throw Exception("Unknown item $item")
         }
         return true
@@ -270,18 +286,14 @@ class MainActivity : AppCompatActivity(R.layout.main) {
                     toast(R.string.no_wallet_is_open_)
                     openDrawer()
                 } else {
-                    val dialog = findDialog(this, SendDialog::class)
-                    if (dialog != null) {
+                    try {
+                        var dialog = findDialog(this, SendDialog::class)
+                        if (dialog == null) {
+                            dialog = SendDialog()
+                            showDialog(this, dialog)
+                        }
                         dialog.onUri(uri.toString())
-                    } else {
-                        try {
-                            showDialog(this, SendDialog().apply {
-                                arguments = Bundle().apply {
-                                    putString("uri", uri.toString())
-                                }
-                            })
-                        } catch (e: ToastException) { e.show() }
-                    }
+                    } catch (e: ToastException) { e.show() }
                 }
             }
         }
@@ -309,7 +321,7 @@ class MainActivity : AppCompatActivity(R.layout.main) {
         ft.attach(newFrag)
         ft.commitNow()
 
-        navBottom.visibility = if (newFrag is NoWalletFragment) View.GONE else View.VISIBLE
+        navBottom.visibility = if (newFrag is WalletNotOpenFragment) View.GONE else View.VISIBLE
     }
 
     fun getFragment(id: Int): Fragment? {
@@ -344,10 +356,10 @@ class MainActivity : AppCompatActivity(R.layout.main) {
 }
 
 
-class NoWalletFragment : Fragment(), MainFragment {
+class WalletNotOpenFragment : Fragment(), MainFragment {
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?,
                               savedInstanceState: Bundle?): View? {
-        return inflater.inflate(R.layout.no_wallet, container, false)
+        return inflater.inflate(R.layout.wallet_not_open, container, false)
     }
 }
 
@@ -377,32 +389,75 @@ class AboutDialog : AlertDialogFragment() {
 }
 
 
-class OpenWalletDialog : PasswordDialog<String>() {
+class WalletOpenDialog : PasswordDialog<String>() {
+    val walletName by lazy { arguments!!.getString("walletName")!! }
+
     override fun onPassword(password: String): String {
-        val name = arguments!!.getString("walletName")!!
-        daemonModel.loadWallet(name, password)
-        return name
+        daemonModel.loadWallet(walletName, password)
+        return walletName
     }
 
     override fun onPostExecute(result: String) {
         daemonModel.commands.callAttr("select_wallet", result)
     }
+
+    override fun onBuildDialog(builder: AlertDialog.Builder) {
+        super.onBuildDialog(builder)
+        builder.setView(R.layout.wallet_open)
+                .setNeutralButton(R.string.Delete, null)
+                .setTitle("")
+    }
+
+    override fun onShowDialog() {
+        super.onShowDialog()
+        tvTitle.text = walletName
+        btnRename.setOnClickListener {
+            showDialog(this, WalletRenameDialog().apply {
+                arguments = Bundle().apply { putString("walletName", walletName) }
+            })
+            dismiss()
+        }
+        btnExport.setOnClickListener {
+            showDialog(this, WalletExportDialog().apply {
+                arguments = Bundle().apply { putString("walletName", walletName) }
+            })
+            dismiss()
+        }
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+            showDialog(activity!!, WalletDeleteConfirmDialog().apply {
+                arguments = Bundle().apply { putString("walletName", walletName) }
+            })
+            dismiss()
+        }
+    }
 }
 
 
-class DeleteWalletConfirmDialog : AlertDialogFragment() {
+class WalletDeleteConfirmDialog : AlertDialogFragment() {
     override fun onBuildDialog(builder: AlertDialog.Builder) {
-        val message = getString(R.string.do_you_want_to_delete, daemonModel.walletName) +
+        val walletName = arguments!!.getString("walletName")!!
+        val message = getString(R.string.are_you_sure_you_want_to_delete, walletName) +
                       "\n\n" + getString(R.string.if_your)
         builder.setTitle(R.string.confirm_delete)
             .setMessage(message)
             .setPositiveButton(R.string.delete, { _, _ ->
-                showDialog(activity!!, DeleteWalletDialog())})
+                showDialog(activity!!, WalletDeleteDialog().apply {
+                    arguments = Bundle().apply { putString("walletName", walletName) }
+                })
+            })
             .setNegativeButton(android.R.string.cancel, null)
     }
 }
 
-class DeleteWalletDialog : CloseWalletDialog() {
+
+class WalletDeleteDialog : WalletCloseDialog() {
+    override fun onPreExecute() {
+        walletName = arguments!!.getString("walletName")!!
+        if (walletName == daemonModel.walletName) {
+            daemonModel.commands.callAttr("select_wallet", null)
+        }
+    }
+
     override fun doInBackground() {
         super.doInBackground()
         daemonModel.commands.callAttr("delete_wallet", walletName)
@@ -415,16 +470,20 @@ class DeleteWalletDialog : CloseWalletDialog() {
 }
 
 
-open class CloseWalletDialog : TaskDialog<Unit>() {
-    var walletName: String by notNull()
+open class WalletCloseDialog : TaskDialog<Unit>() {
+    var walletName: String? = null
 
     override fun onPreExecute() {
-        walletName = daemonModel.walletName!!
+        walletName = daemonModel.walletName
         daemonModel.commands.callAttr("select_wallet", null)
     }
 
     override fun doInBackground() {
-        daemonModel.commands.callAttr("close_wallet", walletName)
+        // It should be impossible for this to be null, but it looks like there's still a race
+        // condition somewhere (#1872).
+        if (walletName != null) {
+            daemonModel.commands.callAttr("close_wallet", walletName)
+        }
     }
 
     override fun onPostExecute(result: Unit) {
@@ -433,10 +492,10 @@ open class CloseWalletDialog : TaskDialog<Unit>() {
 }
 
 
-class ChangePasswordDialog : AlertDialogFragment() {
+class PasswordChangeDialog : AlertDialogFragment() {
     override fun onBuildDialog(builder: AlertDialog.Builder) {
         builder.setTitle(R.string.Change_password)
-            .setView(R.layout.change_password)
+            .setView(R.layout.password_change)
             .setPositiveButton(android.R.string.ok, null)
             .setNegativeButton(android.R.string.cancel, null)
     }
@@ -463,16 +522,114 @@ class ChangePasswordDialog : AlertDialogFragment() {
 }
 
 
-data class ShowSeedResult(val seed: String, val passphrase: String)
+class WalletRenameDialog : AlertDialogFragment() {
+    override fun onBuildDialog(builder: AlertDialog.Builder) {
+        builder.setTitle(R.string.Rename_wallet)
+                .setView(R.layout.wallet_rename)
+                .setPositiveButton(android.R.string.ok, null)
+                .setNegativeButton(android.R.string.cancel, null)
+    }
 
-class ShowSeedPasswordDialog : PasswordDialog<ShowSeedResult>() {
-    override fun onPassword(password: String): ShowSeedResult {
+    override fun onCreateDialog(savedInstanceState: Bundle?): AlertDialog {
+        val dialog = super.onCreateDialog(savedInstanceState)
+        dialog.window!!.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
+        return dialog
+    }
+
+    override fun onFirstShowDialog() {
+        val walletName = arguments!!.getString("walletName")!!
+        etWalletName.setText(walletName)
+        etWalletName.setSelection(0, etWalletName.getText().length)
+    }
+
+    override fun onShowDialog() {
+        val walletName = arguments!!.getString("walletName")!!
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            try {
+                val newWalletName = etWalletName.text.toString()
+                if (newWalletName == walletName) {
+                    done()
+                } else {
+                    validateWalletName(newWalletName)
+                    daemonModel.commands.callAttr("rename_wallet", walletName, newWalletName)
+                    toast(R.string.wallet_renamed, Toast.LENGTH_SHORT)
+                    done(newWalletName)
+                }
+            } catch (e: ToastException) { e.show() }
+        }
+    }
+
+    fun done(newWalletName: String? = null) {
+        dismiss()
+        if(newWalletName != null) {
+            showDialog((activity as MainActivity), WalletOpenDialog().apply {
+                arguments = Bundle().apply { putString("walletName", newWalletName) }
+            })
+        }
+        (activity as MainActivity).refresh()
+    }
+}
+
+class WalletExportDialog : AlertDialogFragment() {
+    override fun onBuildDialog(builder: AlertDialog.Builder) {
+        builder.setTitle(R.string.export_wallet)
+                .setView(R.layout.wallet_export)
+                .setPositiveButton(android.R.string.ok, null)
+                .setNegativeButton(android.R.string.cancel, null)
+    }
+
+    override fun onCreateDialog(savedInstanceState: Bundle?): AlertDialog {
+        val dialog = super.onCreateDialog(savedInstanceState)
+        dialog.window!!.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
+        return dialog
+    }
+
+    @SuppressLint("SetTextI18n")
+    override fun onFirstShowDialog() {
+        val walletName = arguments!!.getString("walletName")!!
+        etExportFileName.setText(walletName)
+        etExportFileName.setSelection(0, etExportFileName.getText().length)
+    }
+
+    override fun onShowDialog() {
+        val walletName = arguments!!.getString("walletName")!!
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val exportFileName = etExportFileName.text
+            if (exportFileName.contains('/')) {
+                toast(R.string.filenames_cannot)
+            } else if (exportFileName.isEmpty()) {
+                toast(R.string.name_is)
+            } else {
+                val exportDir = File(activity!!.cacheDir, "wallet_exports")
+                exportDir.deleteRecursively() // To ensure no more than one temp file lingers
+                val exportFilePath = "$exportDir/$exportFileName"
+                val exportFile = File(exportFilePath)
+                val exportFileUri: Uri = FileProvider.getUriForFile(activity!!,
+                        "org.electroncash.wallet.wallet_exports", exportFile)
+                daemonModel.commands.callAttr("copy_wallet", walletName, exportFilePath)
+                val sendIntent = Intent()
+                sendIntent.type = "application/octet-stream"
+                sendIntent.action = Intent.ACTION_SEND
+                sendIntent.putExtra(Intent.EXTRA_STREAM, exportFileUri)
+                startActivity(Intent.createChooser(sendIntent, "SHARE"))
+                dismiss()
+            }
+        }
+    }
+}
+
+
+data class SeedResult(val seed: String, val passphrase: String)
+
+
+class SeedPasswordDialog : PasswordDialog<SeedResult>() {
+    override fun onPassword(password: String): SeedResult {
         val keystore = daemonModel.wallet!!.callAttr("get_keystore")!!
-        return ShowSeedResult(keystore.callAttr("get_seed", password).toString(),
+        return SeedResult(keystore.callAttr("get_seed", password).toString(),
                               keystore.callAttr("get_passphrase", password).toString())
     }
 
-    override fun onPostExecute(result: ShowSeedResult) {
+    override fun onPostExecute(result: SeedResult) {
         showDialog(activity!!, SeedDialog().apply { arguments = Bundle().apply {
             putString("seed", result.seed)
             putString("passphrase", result.passphrase)
@@ -484,7 +641,7 @@ class ShowSeedPasswordDialog : PasswordDialog<ShowSeedResult>() {
 class SeedDialog : AlertDialogFragment() {
     override fun onBuildDialog(builder: AlertDialog.Builder) {
         builder.setTitle(R.string.Wallet_seed)
-            .setView(R.layout.new_wallet_2)
+            .setView(R.layout.wallet_new_2)
             .setPositiveButton(android.R.string.ok, null)
     }
 

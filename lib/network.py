@@ -43,10 +43,12 @@ from .i18n import _
 from .interface import Connection, Interface
 from . import blockchain
 from . import version
-
+from .tor import TorController
 
 DEFAULT_AUTO_CONNECT = True
-DEFAULT_WHITELIST_SERVERS_ONLY = True
+# Versions prior to 4.0.15 had this set to True, but we opted for False to
+# promote network health by allowing clients to connect to new servers easily.
+DEFAULT_WHITELIST_SERVERS_ONLY = False
 
 def parse_servers(result):
     """ parse servers list into dict format"""
@@ -207,6 +209,8 @@ class Network(util.DaemonThread):
     SERVER_RETRY_INTERVAL = 10  # How often to reconnect when server down in secs
     MAX_MESSAGE_BYTES = 1024*1024*32 # = 32MB. The message size limit in bytes. This is to prevent a DoS vector whereby the server can fill memory with garbage data.
 
+    tor_controller: TorController = None
+
     def __init__(self, config=None):
         if config is None:
             config = {}  # Do not use mutables as default values!
@@ -223,6 +227,10 @@ class Network(util.DaemonThread):
         self.whitelisted_servers, self.whitelisted_servers_hostmap = self._compute_whitelist()
         self.print_error("server blacklist: {} server whitelist: {}".format(self.blacklisted_servers, self.whitelisted_servers))
         self.default_server = self.get_config_server()
+
+        self.tor_controller = TorController(self.config)
+        self.tor_controller.active_port_changed.append(self.on_tor_port_changed)
+        self.tor_controller.start()
 
         self.lock = threading.Lock()
         # locks: if you need to take multiple ones, acquire them in the order they are defined here!
@@ -279,6 +287,20 @@ class Network(util.DaemonThread):
         Network.INSTANCE = self # This implicitly should force stale instances to eventually del
         self.start_network(deserialize_server(self.default_server)[2], deserialize_proxy(self.config.get('proxy')))
 
+    def on_tor_port_changed(self, controller: TorController):
+        if not controller.active_socks_port or not controller.is_enabled() or not self.config.get('tor_use', False):
+            return
+
+        proxy = deserialize_proxy(self.config.get('proxy'))
+        port = str(controller.active_socks_port)
+        if proxy["port"] == port:
+            return
+        proxy["port"] = port
+        self.config.set_key('proxy', serialize_proxy(proxy))
+        # This handler can run before `proxy` is present and `load_parameters` needs it
+        if hasattr(self, "proxy"):
+            self.load_parameters()
+
     def __del__(self):
         ''' NB: due to Network.INSTANCE keeping the singleton instance alive,
             this code isn't normally reached, except for in the iOS
@@ -296,6 +318,9 @@ class Network(util.DaemonThread):
         ''' Returns the extant Network singleton, if any, or None if in offline mode '''
         return Network.INSTANCE
 
+    def callback_listener_count(self, event):
+        return len(self.callbacks.get(event, []))  # we intentionally don't take any locks here as a performance optimization
+
     def register_callback(self, callback, events):
         with self.lock:
             for event in events:
@@ -306,8 +331,10 @@ class Network(util.DaemonThread):
     def unregister_callback(self, callback):
         with self.lock:
             for callbacks in self.callbacks.values():
-                if callback in callbacks:
+                try:
                     callbacks.remove(callback)
+                except ValueError:
+                    pass
 
     def trigger_callback(self, event, *args):
         with self.lock:
@@ -1368,16 +1395,6 @@ class Network(util.DaemonThread):
         # refresh network dialog
         self.notify('interfaces')
 
-    def maintain_requests(self):
-        with self.interface_lock:
-            interfaces = list(self.interfaces.values())
-        for interface in interfaces:
-            if interface.unanswered_requests and time.time() - interface.request_time > 20:
-                # The last request made is still outstanding, and was over 20 seconds ago.
-                interface.print_error("blockchain request timed out")
-                self.connection_down(interface.server)
-                continue
-
     def find_bad_fds_and_kill(self):
         bad = []
         with self.interface_lock:
@@ -1397,19 +1414,33 @@ class Network(util.DaemonThread):
             self.print_error("wait_on_sockets: {} raised by select() call.. trying to recover...".format(err))
             self.find_bad_fds_and_kill()
 
+        rin = []
+        win = []
+        r_immed = []
         with self.interface_lock:
             interfaces = list(self.interfaces.values())
-            rin = [i for i in interfaces if i.fileno() > -1]
-            win = [i for i in interfaces if i.num_requests() and i.fileno() > -1]
+            for interface in interfaces:
+                if interface.fileno() < 0:
+                    continue
+                read_pending, write_pending = interface.pipe.get_selectloop_info()
+                if read_pending:
+                    r_immed.append(interface)
+                else:
+                    rin.append(interface)
+                if write_pending or interface.num_requests():
+                    win.append(interface)
 
-        # Python docs say Windows doesn't like empty selects.
-        # Sleep to prevent busy looping
-        if not win and not rin:
-            time.sleep(0.1)
-            return
+        timeout = 0 if r_immed else 0.1
 
         try:
-            rout, wout, xout = select.select(rin, win, [], 0.1)
+            # Python docs say Windows doesn't like empty selects.
+            if win or rin:
+                rout, wout, xout = select.select(rin, win, [], timeout)
+            else:
+                rout = wout = xout = ()
+                if timeout:
+                    # Sleep to prevent busy looping
+                    time.sleep(timeout)
         except socket.error as e:
             code = None
             if isinstance(e, OSError): # Should always be the case unless ancient python3
@@ -1431,7 +1462,10 @@ class Network(util.DaemonThread):
 
         assert not xout
         for interface in wout:
-            interface.send_requests()
+            if not interface.send_requests():
+                self.connection_down(interface.server)
+        for interface in r_immed:
+            self.process_responses(interface)
         for interface in rout:
             self.process_responses(interface)
 
@@ -1461,11 +1495,15 @@ class Network(util.DaemonThread):
         while self.is_running():
             self.maintain_sockets()
             self.wait_on_sockets()
-            self.maintain_requests()
             if self.verified_checkpoint:
                 self.run_jobs()    # Synchronizer and Verifier and Fx
             self.process_pending_sends()
         self.stop_network()
+
+        self.tor_controller.active_port_changed.remove(self.on_tor_port_changed)
+        self.tor_controller.stop()
+        self.tor_controller = None
+
         self.on_stop()
 
     def on_server_version(self, interface, version_data):
@@ -1802,10 +1840,16 @@ class Network(util.DaemonThread):
                 dust_thold = dust_threshold(Network.get_instance())
             except: pass
             return _("Transaction could not be broadcast due to dust outputs (dust threshold is {} satoshis).").format(dust_thold)
-        elif r'Missing inputs' in server_msg or r'Inputs unavailable' in server_msg or r"bad-txns-inputs-spent" in server_msg:
+        elif r'Missing inputs' in server_msg or r'Inputs unavailable' in server_msg or r"bad-txns-inputs-spent" in server_msg or r"bad-txns-inputs-missingorspent" in server_msg:
             return _("Transaction could not be broadcast due to missing, already-spent, or otherwise invalid inputs.")
-        elif r'insufficient priority' in server_msg:
-            return _("The transaction was rejected due to paying insufficient fees and/or for being of extremely low priority.")
+        elif r"transaction already in block chain" in server_msg:
+            # We get this message whenever any of this transaction's outputs are already in confirmed utxo set (and are unspent).
+            # For confirmed txn with all outputs already spent, we will see "missing inputs" instead.
+            return _("The transaction already exists in the blockchain.")
+        elif r'insufficient priority' in server_msg or r'rate limited free transaction' in server_msg or r'min relay fee not met' in server_msg:
+            return _("The transaction was rejected due to paying insufficient fees.")
+        elif r'mempool min fee not met' in server_msg or r"mempool full" in server_msg:
+            return _("The transaction was rejected due to paying insufficient fees (possibly due to network congestion).")
         elif r'bad-txns-premature-spend-of-coinbase' in server_msg:
             return _("Transaction could not be broadcast due to an attempt to spend a coinbase input before maturity.")
         elif r"txn-already-in-mempool" in server_msg or r"txn-already-known" in server_msg:
@@ -1818,22 +1862,37 @@ class Network(util.DaemonThread):
             return _("The transaction was rejected due to its use of non-standard inputs.")
         elif r"absurdly-high-fee" in server_msg:
             return _("The transaction was rejected because it specifies an absurdly high fee.")
-        elif r"non-mandatory-script-verify-flag" in server_msg:
-            return _("The transaction was rejected because it contains a non-mandatory script verify flag.")
-        elif r"tx-size" in server_msg:
+        elif r"non-mandatory-script-verify-flag" in server_msg or r"mandatory-script-verify-flag-failed" in server_msg or r"upgrade-conditional-script-failure" in server_msg:
+            return _("The transaction was rejected due to an error in script execution.")
+        elif r"tx-size" in server_msg or r"bad-txns-oversize" in server_msg:
             return _("The transaction was rejected because it is too large (in bytes).")
         elif r"scriptsig-size" in server_msg:
             return _("The transaction was rejected because it contains a script that is too large.")
         elif r"scriptpubkey" in server_msg:
-            return _("The transaction was rejected because it contains a non-standard script public key signature.")
+            return _("The transaction was rejected because it contains a non-standard output script.")
         elif r"bare-multisig" in server_msg:
-            return _("The transaction was rejected because it contains a bare multisig input.")
+            return _("The transaction was rejected because it contains a bare multisig output.")
         elif r"multi-op-return" in server_msg:
             return _("The transaction was rejected because it contains multiple OP_RETURN outputs.")
         elif r"scriptsig-not-pushonly" in server_msg:
             return _("The transaction was rejected because it contains non-push-only script sigs.")
-        elif r'bad-txns-nonfinal' in server_msg:
+        elif r'bad-txns-nonfinal' in server_msg or r'non-BIP68-final' in server_msg:
             return _("The transaction was rejected because it is not considered final according to network rules.")
+        elif r"bad-txns-too-many-sigops" in server_msg or r"bad-txn-sigops" in server_msg:
+            # std limit is 4000; this is basically impossible to reach on mainnet using normal txes, due to the 100kB size limit.
+            return _("The transaction was rejected because it contains too many signature-check opcodes.")
+        elif r"bad-txns-inputvalues-outofrange" in server_msg or r"bad-txns-vout-negative" in server_msg or r"bad-txns-vout-toolarge" in server_msg or r"bad-txns-txouttotal-toolarge" in server_msg:
+            return _("The transaction was rejected because its amounts are out of range.")
+        elif r"bad-txns-in-belowout" in server_msg or r"bad-txns-fee-outofrange" in server_msg:
+            return _("The transaction was rejected because it pays a negative or huge fee.")
+        elif r"bad-tx-coinbase" in server_msg:
+            return _("The transaction was rejected because it is a coinbase transaction.")
+        elif r"bad-txns-prevout-null" in server_msg or r"bad-txns-inputs-duplicate" in server_msg:
+            return _("The transaction was rejected because it contains null or duplicate inputs.")
+        elif r"bad-txns-vin-empty" in server_msg or r"bad-txns-vout-empty" in server_msg:
+            return _("The transaction was rejected because it is has no inputs or no outputs.")
+        elif r"bad-txns-undersize" in server_msg:
+            return _("The transaction was rejected because it is too small.")
         elif r'version' in server_msg:
             return _("The transaction was rejected because it uses a non-standard version.")
         return _("An error occurred broadcasting the transaction")
@@ -1925,7 +1984,8 @@ class Network(util.DaemonThread):
         ret -= set(self.config.get('server_whitelist_removed', [])) # this key is all the servers that were hardcoded in the whitelist that the user explicitly removed
         return ret, servers_to_hostmap(ret)
 
-    def is_whitelist_only(self): return bool(self.config.get('whitelist_servers_only', DEFAULT_WHITELIST_SERVERS_ONLY))
+    def is_whitelist_only(self):
+        return bool(self.config.get('whitelist_servers_only', DEFAULT_WHITELIST_SERVERS_ONLY))
 
     def set_whitelist_only(self, b):
         if bool(b) == self.is_whitelist_only():

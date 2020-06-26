@@ -68,7 +68,9 @@ class MakeAllBeforeSdist(setuptools.command.sdist.sdist):
         ("disable-secp", None, "Disable libsecp256k1 complilation (default)."),
         ("enable-secp", None, "Enable libsecp256k1 complilation."),
         ("disable-zbar", None, "Disable libzbar complilation (default)."),
-        ("enable-zbar", None, "Enable libzbar complilation.")
+        ("enable-zbar", None, "Enable libzbar complilation."),
+        ("disable-tor", None, "Disable tor complilation (default)."),
+        ("enable-tor", None, "Enable tor complilation.")
     ]
 
     def initialize_options(self):
@@ -76,6 +78,8 @@ class MakeAllBeforeSdist(setuptools.command.sdist.sdist):
         self.enable_secp = None
         self.disable_zbar = None
         self.enable_zbar = None
+        self.disable_tor = None
+        self.enable_tor = None
         super().initialize_options()
 
     def finalize_options(self):
@@ -85,6 +89,9 @@ class MakeAllBeforeSdist(setuptools.command.sdist.sdist):
         if self.enable_zbar is None:
             self.enable_zbar = False
         self.enable_zbar = not self.disable_zbar and self.enable_zbar
+        if self.enable_tor is None:
+            self.enable_tor = False
+        self.enable_tor = not self.disable_tor and self.enable_tor
         super().finalize_options()
 
     def run(self):
@@ -99,6 +106,15 @@ class MakeAllBeforeSdist(setuptools.command.sdist.sdist):
         if self.enable_zbar:
             self.announce("Running make_zbar...")
             0==os.system("contrib/make_zbar") or sys.exit("Could not build libzbar")
+        if self.enable_tor:
+            self.announce("Running make_openssl...")
+            0==os.system("contrib/make_openssl") or sys.exit("Could not build openssl")
+            self.announce("Running make_libevent...")
+            0==os.system("contrib/make_libevent") or sys.exit("Could not build libevent")
+            self.announce("Running make_zlib...")
+            0==os.system("contrib/make_zlib") or sys.exit("Could not build zlib")
+            self.announce("Running make_tor...")
+            0==os.system("contrib/make_tor") or sys.exit("Could not build tor")
         super().run()
 
 
@@ -131,14 +147,15 @@ setup(
     },
     packages=[
         'electroncash',
-        'electroncash.locale',  # work-around for Android platform limitations
         'electroncash.qrreaders',
         'electroncash.slp',
+        'electroncash.tor',
         'electroncash.utils',
         'electroncash_gui',
         'electroncash_gui.qt',
         'electroncash_gui.qt.qrreader',
         'electroncash_gui.qt.utils',
+        'electroncash_gui.qt.utils.darkdetect',
         'electroncash_plugins',
         'electroncash_plugins.audio_modem',
         'electroncash_plugins.cosigner_pool',
@@ -152,7 +169,6 @@ setup(
         'electroncash_plugins.virtualkeyboard',
         'electroncash_plugins.shuffle',
         'electroncash_plugins.satochip',
-        'electroncash_plugins.satochip_2FA',
     ],
     package_dir={
         'electroncash': 'lib',
@@ -169,10 +185,10 @@ setup(
             'libsecp256k1*',
             'libzbar*',
             'locale/*/LC_MESSAGES/electron-cash.mo',
+            'tor/bin/*'
         ],
         'electroncash_plugins.shuffle' : [
-            'servers.json',
-            'protobuf/*.proto'
+            'servers.json'
         ],
         # On Linux and Windows this means adding gui/qt/data/*.ttf
         # On Darwin we don't use that font, so we don't add it to save space.

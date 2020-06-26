@@ -24,14 +24,12 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from unicodedata import normalize
-
 from . import bitcoin
 from .bitcoin import *
 
 from .address import Address, PublicKey
 from . import networks
-from .mnemonic import Mnemonic, load_wordlist
+from .mnemonic import Mnemonic, Mnemonic_Electrum, seed_type_name, is_seed
 from .plugins import run_hook
 from .util import PrintError, InvalidPassword, hfu
 
@@ -44,6 +42,10 @@ class KeyStore(PrintError):
         self.thread = None  # Hardware_KeyStore may use this attribute, otherwise stays None
 
     def has_seed(self):
+        return False
+
+    def has_derivation(self):
+        """ Only applies to BIP32 keystores. """
         return False
 
     def is_watching_only(self):
@@ -102,7 +104,7 @@ class Software_KeyStore(KeyStore):
         decrypted = ec.decrypt_message(message)
         return decrypted
 
-    def sign_transaction(self, tx, password):
+    def sign_transaction(self, tx, password, *, use_cache=False):
         if self.is_watching_only():
             return
         # Raise if password is not correct.
@@ -113,7 +115,7 @@ class Software_KeyStore(KeyStore):
             keypairs[k] = self.get_private_key(v, password)
         # Sign
         if keypairs:
-            tx.sign(keypairs)
+            tx.sign(keypairs, use_cache=use_cache)
 
 
 class Imported_KeyStore(Software_KeyStore):
@@ -219,6 +221,7 @@ class Deterministic_KeyStore(Software_KeyStore):
         Software_KeyStore.__init__(self)
         self.seed = d.get('seed', '')
         self.passphrase = d.get('passphrase', '')
+        self.seed_type = d.get('seed_type')
 
     def is_deterministic(self):
         return True
@@ -229,6 +232,8 @@ class Deterministic_KeyStore(Software_KeyStore):
             d['seed'] = self.seed
         if self.passphrase:
             d['passphrase'] = self.passphrase
+        if self.seed_type is not None:
+            d['seed_type'] = self.seed_type
         return d
 
     def has_seed(self):
@@ -240,10 +245,16 @@ class Deterministic_KeyStore(Software_KeyStore):
     def can_change_password(self):
         return not self.is_watching_only()
 
-    def add_seed(self, seed):
+    def add_seed(self, seed, *, seed_type='electrum'):
         if self.seed:
             raise Exception("a seed exists")
         self.seed = self.format_seed(seed)
+        self.seed_type = seed_type
+
+    def format_seed(self, seed):
+        """ Default impl. for BIP39 or Electrum seed wallets.  Old_Keystore
+        overrides this. """
+        return Mnemonic.normalize_text(seed)
 
     def get_seed(self, password):
         return pw_decode(self.seed, password)
@@ -338,15 +349,14 @@ class BIP32_KeyStore(Deterministic_KeyStore, Xpub):
         Deterministic_KeyStore.__init__(self, d)
         self.xpub = d.get('xpub')
         self.xprv = d.get('xprv')
-
-    def format_seed(self, seed):
-        return ' '.join(seed.split())
+        self.derivation = d.get('derivation')
 
     def dump(self):
         d = Deterministic_KeyStore.dump(self)
         d['type'] = 'bip32'
         d['xpub'] = self.xpub
         d['xprv'] = self.xprv
+        d['derivation'] = self.derivation
         return d
 
     def get_master_private_key(self, password):
@@ -376,6 +386,11 @@ class BIP32_KeyStore(Deterministic_KeyStore, Xpub):
             b = pw_decode(self.xprv, old_password)
             self.xprv = pw_encode(b, new_password)
 
+    def has_derivation(self) -> bool:
+        """ Note: the derivation path may not always be saved. Older versions
+        of Electron Cash would not save the path to keystore :/. """
+        return bool(self.derivation)
+
     def is_watching_only(self):
         return self.xprv is None
 
@@ -387,6 +402,7 @@ class BIP32_KeyStore(Deterministic_KeyStore, Xpub):
         xprv, xpub = bip32_root(bip32_seed, xtype)
         xprv, xpub = bip32_private_derivation(xprv, "m/", derivation)
         self.add_xprv(xprv)
+        self.derivation = derivation
 
     def get_private_key(self, sequence, password):
         xprv = self.get_master_private_key(password)
@@ -413,8 +429,8 @@ class Old_KeyStore(Deterministic_KeyStore):
         d['type'] = 'old'
         return d
 
-    def add_seed(self, seedphrase):
-        Deterministic_KeyStore.add_seed(self, seedphrase)
+    def add_seed(self, seedphrase, *, seed_type='old'):
+        Deterministic_KeyStore.add_seed(self, seedphrase, seed_type=seed_type)
         s = self.get_hex_seed(None)
         self.mpk = self.mpk_from_seed(s)
 
@@ -422,8 +438,8 @@ class Old_KeyStore(Deterministic_KeyStore):
         self.mpk = mpk
 
     def format_seed(self, seed):
-        from . import old_mnemonic, mnemonic
-        seed = mnemonic.normalize_text(seed)
+        from . import old_mnemonic
+        seed = super().format_seed(seed)
         # see if seed was entered as hex
         if seed:
             try:
@@ -568,6 +584,9 @@ class Hardware_KeyStore(KeyStore, Xpub):
     def is_deterministic(self):
         return True
 
+    def has_derivation(self) -> bool:
+        return bool(self.derivation)
+
     def dump(self):
         return {
             'type': 'hardware',
@@ -604,52 +623,6 @@ class Hardware_KeyStore(KeyStore, Xpub):
         transactions to sign a transactions'''
         return True
 
-
-
-def bip39_normalize_passphrase(passphrase):
-    return normalize('NFKD', passphrase or '')
-
-def bip39_to_seed(mnemonic, passphrase):
-    import hashlib, hmac
-    PBKDF2_ROUNDS = 2048
-    mnemonic = normalize('NFKD', ' '.join(mnemonic.split()))
-    passphrase = bip39_normalize_passphrase(passphrase)
-    return hashlib.pbkdf2_hmac('sha512', mnemonic.encode('utf-8'),
-        b'mnemonic' + passphrase.encode('utf-8'), iterations = PBKDF2_ROUNDS)
-
-def bip39_is_checksum_valid(mnemonic):
-    """Test checksum of bip39 mnemonic assuming English wordlist.
-    Returns tuple (is_checksum_valid, is_wordlist_valid) """
-    words = [ normalize('NFKD', word) for word in mnemonic.split() ]
-    words_len = len(words)
-    wordlist = load_wordlist("english.txt")
-    n = len(wordlist)
-    i = 0
-    words.reverse()
-    while words:
-        w = words.pop()
-        try:
-            k = wordlist.index(w)
-        except ValueError:
-            return False, False
-        i = i*n + k
-    if words_len not in [12, 15, 18, 21, 24]:
-        return False, True
-    checksum_length = 11 * words_len // 33  # num bits
-    entropy_length = 32 * checksum_length  # num bits
-    entropy = i >> checksum_length
-    checksum = i % 2**checksum_length
-    entropy_bytes = int.to_bytes(entropy, length=entropy_length//8, byteorder="big")
-    hashed = int.from_bytes(sha256(entropy_bytes), byteorder="big")
-    calculated_checksum = hashed >> (256 - checksum_length)
-    return checksum == calculated_checksum, True
-
-def from_bip39_seed(seed, passphrase, derivation):
-    k = BIP32_KeyStore({})
-    bip32_seed = bip39_to_seed(seed, passphrase)
-    t = 'standard'  # bip43
-    k.add_xprv_from_seed(bip32_seed, t, derivation)
-    return k
 
 # extended pubkeys
 
@@ -766,19 +739,38 @@ def bip44_derivation(account_id):
 def bip44_derivation_145(account_id):
 	return "m/44'/145'/%d'"% int(account_id)
 
-def from_seed(seed, passphrase, is_p2sh):
-    t = seed_type(seed)
-    if t == 'old':
+def bip39_normalize_passphrase(passphrase):
+    """ This is called by some plugins """
+    return Mnemonic.normalize_text(passphrase or '', is_passphrase=True)
+
+def bip39_to_seed(seed: str, passphrase: str) -> bytes:
+    """This is called by some plugins """
+    return Mnemonic.mnemonic_to_seed(seed, passphrase)
+
+
+def from_seed(seed, passphrase, is_p2sh=None, *, seed_type='', derivation=None) -> KeyStore:
+    del is_p2sh  # argument totally ignored.  Legacy API.
+    if not seed_type:
+        seed_type = seed_type_name(seed)  # auto-detect
+    if seed_type == 'old':
         keystore = Old_KeyStore({})
-        keystore.add_seed(seed)
-    elif t in ['standard']:
+        keystore.add_seed(seed, seed_type=seed_type)
+    elif seed_type in ['standard', 'electrum']:
         keystore = BIP32_KeyStore({})
-        keystore.add_seed(seed)
+        keystore.add_seed(seed, seed_type = "electrum")  # force it to be "electrum"
+        keystore.passphrase = passphrase
+        bip32_seed = Mnemonic_Electrum.mnemonic_to_seed(seed, passphrase)
+        derivation = 'm/'
+        xtype = 'standard'
+        keystore.add_xprv_from_seed(bip32_seed, xtype, derivation)
+    elif seed_type == 'bip39':
+        keystore = BIP32_KeyStore({})
+        keystore.add_seed(seed, seed_type = seed_type)
         keystore.passphrase = passphrase
         bip32_seed = Mnemonic.mnemonic_to_seed(seed, passphrase)
-        der = "m/"
-        xtype = 'standard'
-        keystore.add_xprv_from_seed(bip32_seed, xtype, der)
+        xtype = 'standard'  # bip43
+        derivation = derivation or bip44_derivation_145(0)
+        keystore.add_xprv_from_seed(bip32_seed, xtype, derivation)
     else:
         raise InvalidSeed()
     return keystore

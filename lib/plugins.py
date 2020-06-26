@@ -41,8 +41,8 @@ from typing import Callable, Optional
 from . import bitcoin
 from . import version
 from .i18n import _
-from .util import print_error, print_stderr, user_dir, make_dir
-from .util import profiler, PrintError, DaemonThread, UserCancelled, ThreadJob
+from .util import (print_error, print_stderr, make_dir, profiler, user_dir,
+                   DaemonThread, PrintError, ThreadJob, UserCancelled)
 
 plugin_loaders = {}
 hooks = defaultdict(list)
@@ -106,6 +106,35 @@ class Plugins(DaemonThread):
             self.register_keystore(name, gui_good, details, is_external)
         return True
 
+    def retranslate_internal_plugin_metadata(self, name):
+        """ Retranslate: "fullname" and "description". We need to do this
+        because the static _("some text") strings in the plugin's __init__.py is
+        not translated at startup even though it has a _() decorator because
+        gettext language is set *after* internal plugin modules are loaded.
+
+        This needs to be called once at startup and then again from the GUI. """
+        d = self.internal_plugin_metadata.get(name)
+        if not d:
+            return
+        ut_prefix = '_untranslated_'
+        for key in ('fullname', 'description'):
+            ut_key = ut_prefix + key
+            ut_val = val = d.get(ut_key)  # first see if saved original untranslated metadata is available
+            if val is None:
+                ut_val = val = d.get(key)
+                if not val:
+                    continue
+            delim = d.get(key + '_delimiter', ' ')
+            if isinstance(val, (list, tuple)):
+                val = delim.join([_(x) for x in val])  # retranslate each list item
+            elif isinstance(val, str):
+                val = _(val)  # retranslate
+            if not isinstance(val, str):
+                self.print_error(f'Warning: plugin "{name}" metadata key "{key}" expected str, instead got {type(val)}')
+            else:
+                d[key] = val  # rewrite translated string
+                d[ut_key] = ut_val # save untranslated metadata for later so that this function may be called again from GUI
+
     def load_internal_plugins(self):
         for loader, name, ispkg in pkgutil.iter_modules([self.internal_plugins_pkgpath]):
             # do not load deprecated plugins
@@ -116,7 +145,18 @@ class Plugins(DaemonThread):
             if not self.register_plugin(name, d):
                 continue
             self.internal_plugin_metadata[name] = d
-            if not d.get('requires_wallet_type') and self.config.get(INTERNAL_USE_PREFIX + name):
+            self.retranslate_internal_plugin_metadata(name)
+            conf_key = INTERNAL_USE_PREFIX + name
+            conf_value = self.config.get(conf_key)
+            if conf_value is None and d.get('default_on'):
+                # An internal plugin wants to be on by default (default_on =
+                # True in its __init__.py). This only applies if no config value
+                # was specified for the plugin (e.g. a new install). If the user
+                # manually disabled the plugin, conf_value will be False (and
+                # not None), and this branch will not be taken.
+                conf_value = True
+                self.config.set_key(conf_key, conf_value)
+            if not d.get('requires_wallet_type') and conf_value:
                 try:
                     self.load_internal_plugin(name)
                 except BaseException as e:
@@ -509,11 +549,54 @@ def _get_func_if_hook(plugin, attr_name) -> Optional[Callable]:
         if callable(func):
             return func
 
-def run_hook(name, *args):
+def run_hook(name, *args, **kwargs):
+    """ Invokes a named @hook on all enabled plugins. Not all plugins or hooks
+    return values. Example follows:
+
+    # in plugin A
+    @hook
+    def myhook(self, arg1, arg2):
+        # ...
+        return  # None return value will be discarded
+
+    # in plugin B (loaded after A)
+    @hook
+    def myhook(self, arg1, arg2):
+        # ...
+        return "hello"
+
+    # in plugin C (loaded after B)
+    @hook
+    def myhook(self, arg1, arg2):
+        # ...
+        return "hiya"
+
+    # in application code
+    res = run_hook("myhook", arg1, arg2)  # res = "hello" here
+    res = run_hook("myhook", arg1, arg2, multi=True)  # res = ["hello", "hiya"]
+
+    kwargs:
+        multi - default False. Specify multi=True to return a list of results.
+            This is for cases where multiple plugins implement the same hook
+            that returns results. Note that 'None' results are never present in
+            the result set if multi=True. The empty list is returned if no
+            plugins returned any non-None results. multi=False will return a
+            single item: the first non-None result encountered, or None if no
+            such result was returned from any invoked hooks. """
+    multi = bool(kwargs.get('multi', False))
+
+    this_thread = threading.current_thread()
+    if this_thread is not threading.main_thread():
+        msg = (f'Warning: run_hook "{name}" being called from outside the main'
+               f' thread (thr: {this_thread.name}) may lead to undefined'
+                ' behavior. Please use util.do_in_main_thread to call run_hook'
+                ' if the hook in question does not return any results.'
+                '\nTraceback:\n') + ''.join(traceback.format_stack())
+        print_error(msg)
     f_list = hooks.get(name)
     if not f_list:
         # short-circuit return: most of the time this code path is taken
-        return
+        return None if not multi else []
     results = []
     for p, f in f_list:
         if p.is_enabled():
@@ -522,10 +605,12 @@ def run_hook(name, *args):
             except Exception:
                 print_error("Plugin error")
                 traceback.print_exc(file=sys.stdout)
-                r = False
-            if r:
-                results.append(r)
+            else:
+                if r is not None:
+                    results.append(r)
 
+    if multi:
+        return results
     if results:
         if len(results) > 1:
             print_error(f"run_hook: got more than 1 result from @hook '{name}':", results)

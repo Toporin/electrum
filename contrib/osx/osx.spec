@@ -47,6 +47,8 @@ binaries = [(home + "contrib/osx/libusb-1.0.dylib", ".")]
 binaries += [(home + "contrib/osx/libsecp256k1.0.dylib", ".")]
 # LibZBar for QR code scanning
 binaries += [(home + "contrib/osx/libzbar.0.dylib", ".")]
+# Add Tor binary
+binaries += [(home + "lib/tor/bin/tor", ".")]
 
 # Workaround for "Retro Look":
 binaries += [b for b in collect_dynamic_libs('PyQt5') if 'macstyle' in b[0]]
@@ -62,6 +64,7 @@ a = Analysis([home+MAIN_SCRIPT,
               home+'lib/bitcoin.py',
               home+'lib/dnssec.py',
               home+'lib/commands.py',
+              home+'lib/tor/controller.py',
               home+'plugins/cosigner_pool/qt.py',
               home+'plugins/email_requests/qt.py',
               home+'plugins/trezor/clientbase.py',
@@ -114,24 +117,29 @@ for x in a.binaries.copy():
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-exe = EXE(pyz,
-          a.scripts,
-          a.binaries,
-          a.datas,
-          name=PACKAGE,
-          debug=False,
-          strip=False,
-          upx=True,
-          icon=home+ICONS_FILE,
-          console=False)
+exe = EXE(
+    pyz,
+    a.scripts,
+    exclude_binaries=True,
+    name=PACKAGE,
+    debug=False,
+    strip=False,
+    upx=False,
+    icon=home+ICONS_FILE,
+    console=False
+)
 
-app = BUNDLE(exe,
-             version = VERSION,
-             name=PACKAGE + '.app',
-             icon=home+ICONS_FILE,
-             bundle_identifier=BUNDLE_IDENTIFIER,
-             info_plist = {
-                 'NSHighResolutionCapable':'True',
-                 'NSSupportsAutomaticGraphicsSwitching':'True'
-             }
+app = BUNDLE(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    version = VERSION,
+    name=PACKAGE + '.app',
+    icon=home+ICONS_FILE,
+    bundle_identifier=BUNDLE_IDENTIFIER,
+    info_plist = {
+        'NSHighResolutionCapable':'True',
+        'NSSupportsAutomaticGraphicsSwitching':'True'
+    }
 )

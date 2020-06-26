@@ -3,8 +3,9 @@ from __future__ import absolute_import, division, print_function
 from code import InteractiveConsole
 import json
 import os
-from os.path import exists, join
+from os.path import dirname, exists, join, split
 import pkgutil
+from shutil import copyfile
 import unittest
 
 from electroncash import commands, daemon, keystore, simple_config, storage, tests, util
@@ -82,7 +83,7 @@ class AndroidCommands(commands.Commands):
 
         # Initialize here rather than in start() so the DaemonModel has a chance to register
         # its callback before the daemon threads start.
-        self.daemon = daemon.Daemon(self.config, fd, False)
+        self.daemon = daemon.Daemon(self.config, fd, False, None)
         self.network = self.daemon.network
         self.network.register_callback(self._on_callback, CALLBACKS)
         self.daemon_running = False
@@ -143,14 +144,15 @@ class AndroidCommands(commands.Commands):
             wallet = ImportedPrivkeyWallet.from_text(storage, privkeys)
         else:
             if bip39_derivation is not None:
-                ks = keystore.from_bip39_seed(seed, passphrase, bip39_derivation)
+                ks = keystore.from_seed(seed, passphrase, seed_type='bip39',
+                                        derivation=bip39_derivation)
             elif master is not None:
                 ks = keystore.from_master_key(master)
             else:
                 if seed is None:
                     seed = self.make_seed()
                     print("Your wallet generation seed is:\n\"%s\"" % seed)
-                ks = keystore.from_seed(seed, passphrase, False)
+                ks = keystore.from_seed(seed, passphrase)
 
             storage.put('keystore', ks.dump())
             wallet = Standard_Wallet(storage)
@@ -176,6 +178,36 @@ class AndroidCommands(commands.Commands):
     def delete_wallet(self, name=None):
         """Delete a wallet"""
         os.remove(self._wallet_path(name))
+
+    def rename_wallet(self, name, new_name):
+        if name == new_name:
+            return
+        original_path = self._wallet_path(name)
+        if not exists(original_path):
+            raise FileNotFoundError(original_path)
+        new_path = join(split(original_path)[0], new_name)
+        if exists(new_path):
+            raise FileExistsError(new_path)
+        if self.wallet is not None and self.wallet.storage.path == original_path:
+            # We are renaming the currently loaded wallet. Close it before renaming it.
+            self.close_wallet(name)
+            self.select_wallet(None)
+        os.rename(original_path, new_path)
+
+    def copy_wallet(self, name, destination_path, overwrite=True, create_dir=True):
+        original_path = self._wallet_path(name)
+        if not exists(original_path):
+            raise FileNotFoundError(original_path)
+        destination_dir = dirname(destination_path)
+        if not exists(destination_dir):
+            if create_dir:
+                os.makedirs(destination_dir)
+            else:
+                raise FileNotFoundError(destination_dir)
+        if not overwrite:
+            if exists(destination_path):
+                raise FileExistsError(destination_path)
+        copyfile(original_path, destination_path)
 
     def unit_test(self):
         """Run all unit tests. Expect failures with functionality not present on Android,

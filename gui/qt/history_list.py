@@ -45,6 +45,7 @@ TX_ICONS = [
 
 class HistoryList(MyTreeWidget):
     filter_columns = [2, 3, 4]  # Date, Description, Amount
+    filter_data_columns = [0]  # Allow search on tx_hash (string)
     statusIcons = {}
     default_sort = MyTreeWidget.SortSpec(0, Qt.AscendingOrder)
 
@@ -224,7 +225,7 @@ class HistoryList(MyTreeWidget):
         tx_hash = item.data(0, Qt.UserRole)
         if not tx_hash:
             return
-        if column is 0:
+        if column == 0:
             column_title = "ID"
             column_data = tx_hash
         else:

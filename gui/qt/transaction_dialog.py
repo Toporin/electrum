@@ -33,12 +33,14 @@ from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
 
+from electroncash import cashacct
+from electroncash import web
+
 from electroncash.address import Address, PublicKey, ScriptOutput
 from electroncash.bitcoin import base_encode
 from electroncash.i18n import _, ngettext
 from electroncash.plugins import run_hook
-from electroncash import web
-from electroncash import cashacct
+from electroncash.transaction import Transaction, InputValueMissing
 
 from electroncash.util import bfh, Weak, PrintError
 from .util import *
@@ -289,7 +291,7 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
             while True:
                 try:
                     # Esoteric bug happens when user rejects password dialog on top of this window.. so we must keep popping self off the top_level_windows
-                    self.main_window.pop_top_level_window(self)
+                    self.main_window.pop_top_level_window(self, raise_if_missing=True)
                 except ValueError:
                     break
             # The below is used to clean up any modal dialogs this txdialog may have up
@@ -347,9 +349,8 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
         fee = None
         try:
             fee = self.tx.get_fee()
-        except (KeyError, TypeError, ValueError):
-            # 'value' key missing or bad from an input
-            pass
+        except InputValueMissing:
+            ''' 'value' key missing or bad from an input '''
         return fee
 
     def update(self):
@@ -384,6 +385,11 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
         self.tx_hash_e.setText(tx_hash or _('Unknown'))
         if fee is None:
             fee = self.try_calculate_fee()
+        if fee is None:
+            # see if we can grab the fee from the wallet internal cache which
+            # sometimes has fees for tx's not entirely 'is_mine'
+            if self.wallet and self.tx_hash:
+                fee = self.wallet.tx_fees.get(self.tx_hash)
         if desc is None:
             self.tx_desc.hide()
         else:
@@ -433,11 +439,10 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
         run_hook('transaction_dialog_update', self)
 
     def is_fetch_input_data(self):
-        # default on if network.auto_connect is True, otherwise use config value.
-        return bool(self.wallet.network and self.main_window.config.get('fetch_input_data', self.wallet.network.auto_connect))
+        return self.main_window.is_fetch_input_data()
 
     def set_fetch_input_data(self, b):
-        self.main_window.config.set_key('fetch_input_data', bool(b))
+        self.main_window.set_fetch_input_data(b)
         if self.is_fetch_input_data():
             self.initiate_fetch_input_data(bool(self.try_calculate_fee() is None))
         else:
@@ -466,6 +471,7 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
         self.dl_input_chk = chk = QCheckBox(_("&Download input data"))
         chk.setChecked(self.is_fetch_input_data())
         chk.clicked.connect(self.set_fetch_input_data)
+        chk.setToolTip(_("If this is checked, accurate fee and input value data will be retrieved from the network"))
         hbox.addWidget(chk)
         hbox.addStretch(1)
         if not self.wallet.network:
@@ -810,7 +816,7 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
                     text_getter = lambda: self.wallet.cashacct.fmt_info(cashacct.Info.from_script(ca_script, self.tx_hash), emoji=True)
                     text_getter()  # go out to network to cache the shortest encoding for cash account name ahead of time...
                     copy_list += [ ( _("Copy Cash Account"), lambda: self._copy_to_clipboard(text_getter(), o_text) ) ]
-        except (TypeError, ValueError, IndexError, KeyError) as e:
+        except (TypeError, ValueError, IndexError, KeyError, AttributeError) as e:
             self.print_error("Outputs right-click menu exception:", repr(e))
 
         for item in show_list:
