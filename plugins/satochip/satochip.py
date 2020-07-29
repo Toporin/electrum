@@ -39,8 +39,8 @@ try:
     LIBS_AVAILABLE = True
 except:
     LIBS_AVAILABLE = False
-    self.print_error("[satochip] failed to import requisite libraries, please install the 'pyscard' and 'pysatochip' libraries")
-    self.print_error("[satochip] satochip will not not be available")
+    print_error("[satochip] failed to import requisite libraries, please install the 'pyscard' and 'pysatochip' libraries")
+    print_error("[satochip] satochip will not not be available")
     raise
 
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s [%(module)s] %(funcName)s | %(message)s') #debugSatochip
