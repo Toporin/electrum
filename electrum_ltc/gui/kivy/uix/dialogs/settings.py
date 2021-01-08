@@ -9,6 +9,8 @@ from electrum_ltc.gui.kivy.i18n import _
 from electrum_ltc.plugin import run_hook
 from electrum_ltc import coinchooser
 
+from electrum_ltc.gui.kivy import KIVY_GUI_PATH
+
 from .choice_dialog import ChoiceDialog
 
 Builder.load_string('''
@@ -18,7 +20,7 @@ Builder.load_string('''
 <SettingsDialog@Popup>
     id: settings
     title: _('Electrum Settings')
-    disable_pin: False
+    has_pin_code: False
     use_encryption: False
     BoxLayout:
         orientation: 'vertical'
@@ -36,10 +38,10 @@ Builder.load_string('''
                     action: partial(root.language_dialog, self)
                 CardSeparator
                 SettingsItem:
-                    disabled: root.disable_pin
-                    title: _('PIN code')
-                    description: _("Change your PIN code.")
-                    action: partial(root.change_password, self)
+                    status: 'ON' if root.has_pin_code else 'OFF'
+                    title: _('PIN code') + ': ' + self.status
+                    description: _("Change your PIN code.") if root.has_pin_code else _("Add PIN code")
+                    action: partial(root.change_pin_code, self)
                 CardSeparator
                 SettingsItem:
                     bu: app.base_unit
@@ -82,6 +84,18 @@ Builder.load_string('''
                     description: _("Send your change to separate addresses.")
                     message: _('Send excess coins to change addresses')
                     action: partial(root.boolean_dialog, 'use_change', _('Use change addresses'), self.message)
+                CardSeparator
+                SettingsItem:
+                    title: _('Password')
+                    description: _("Change wallet password.")
+                    action: root.change_password
+                CardSeparator
+                SettingsItem:
+                    status: _('Yes') if app.android_backups else _('No')
+                    title: _('Backups') + ': ' + self.status
+                    description: _("Backup wallet to external storage.")
+                    message: _("If this option is checked, a backup of your wallet will be written to external storage everytime you create a new channel. Make sure your wallet is protected with a strong password before you enable this option.")
+                    action: partial(root.boolean_dialog, 'android_backups', _('Backups'), self.message)
 
                 # disabled: there is currently only one coin selection policy
                 #CardSeparator
@@ -112,14 +126,17 @@ class SettingsDialog(Factory.Popup):
 
     def update(self):
         self.wallet = self.app.wallet
-        self.disable_pin = self.wallet.is_watching_only() if self.wallet else True
         self.use_encryption = self.wallet.has_password() if self.wallet else False
+        self.has_pin_code = self.app.has_pin_code()
 
     def get_language_name(self):
         return languages.get(self.config.get('language', 'en_UK'), '')
 
-    def change_password(self, item, dt):
+    def change_password(self, dt):
         self.app.change_password(self.update)
+
+    def change_pin_code(self, label, dt):
+        self.app.change_pin_code(self.update)
 
     def language_dialog(self, item, dt):
         if self._language_dialog is None:
@@ -178,7 +195,7 @@ class SettingsDialog(Factory.Popup):
                 net_params = net_params._replace(proxy=proxy)
                 network.run_from_another_thread(network.set_parameters(net_params))
                 item.status = self.proxy_status()
-            popup = Builder.load_file('electrum_ltc/gui/kivy/uix/ui_screens/proxy.kv')
+            popup = Builder.load_file(KIVY_GUI_PATH + '/uix/ui_screens/proxy.kv')
             popup.ids.mode.text = proxy.get('mode') if proxy else 'None'
             popup.ids.host.text = proxy.get('host') if proxy else ''
             popup.ids.port.text = proxy.get('port') if proxy else ''

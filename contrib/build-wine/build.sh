@@ -2,15 +2,18 @@
 
 set -e
 
-# Lucky number
-export PYTHONHASHSEED=22
-
 here="$(dirname "$(readlink -e "$0")")"
 test -n "$here" -a -d "$here" || exit
 
 export CONTRIB="$here/.."
+export PROJECT_ROOT="$CONTRIB/.."
 export CACHEDIR="$here/.cache"
 export PIP_CACHE_DIR="$CACHEDIR/pip_cache"
+
+export BUILD_TYPE="wine"
+export GCC_TRIPLET_HOST="i686-w64-mingw32"  # make sure to clear caches if changing this
+export GCC_TRIPLET_BUILD="x86_64-pc-linux-gnu"
+export GCC_STRIP_BINARIES="1"
 
 . "$CONTRIB"/build_tools_util.sh
 
@@ -20,7 +23,17 @@ rm "$here"/dist/* -rf
 
 mkdir -p "$CACHEDIR" "$PIP_CACHE_DIR"
 
-$here/build-secp256k1.sh || fail "build-secp256k1 failed"
+if [ -f "$PROJECT_ROOT/electrum_ltc/libsecp256k1-0.dll" ]; then
+    info "libsecp256k1 already built, skipping"
+else
+    "$CONTRIB"/make_libsecp256k1.sh || fail "Could not build libsecp"
+fi
+
+if [ -f "$PROJECT_ROOT/electrum_ltc/libzbar-0.dll" ]; then
+    info "libzbar already built, skipping"
+else
+    "$CONTRIB"/make_zbar.sh || fail "Could not build zbar"
+fi
 
 $here/prepare-wine.sh || fail "prepare-wine failed"
 

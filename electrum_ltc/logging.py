@@ -91,7 +91,7 @@ def _configure_file_logging(log_directory: pathlib.Path):
     PID = os.getpid()
     _logfile_path = log_directory / f"electrum_ltc_log_{timestamp}_{PID}.log"
 
-    file_handler = logging.FileHandler(_logfile_path)
+    file_handler = logging.FileHandler(_logfile_path, encoding='utf-8')
     file_handler.setFormatter(file_formatter)
     file_handler.setLevel(logging.DEBUG)
     root_logger.addHandler(file_handler)
@@ -232,10 +232,13 @@ def configure_logging(config):
     verbosity_shortcuts = config.get('verbosity_shortcuts')
     _configure_verbosity(verbosity=verbosity, verbosity_shortcuts=verbosity_shortcuts)
 
+    log_to_file = config.get('log_to_file', False)
     is_android = 'ANDROID_DATA' in os.environ
-    if is_android or not config.get('log_to_file', False):
-        pass  # disable file logging
-    else:
+    if is_android:
+        from jnius import autoclass
+        build_config = autoclass("org.electrum_ltc.electrum_ltc.BuildConfig")
+        log_to_file |= bool(build_config.DEBUG)
+    if log_to_file:
         log_directory = pathlib.Path(config.path) / "logs"
         _configure_file_logging(log_directory)
 

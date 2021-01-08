@@ -16,6 +16,7 @@ home = 'C:\\electrum-ltc\\'
 
 # see https://github.com/pyinstaller/pyinstaller/issues/2005
 hiddenimports = []
+hiddenimports += collect_submodules('pkg_resources')  # workaround for https://github.com/pypa/setuptools/issues/1963
 hiddenimports += collect_submodules('trezorlib')
 hiddenimports += collect_submodules('safetlib')
 hiddenimports += collect_submodules('btchip')
@@ -24,30 +25,28 @@ hiddenimports += collect_submodules('websocket')
 hiddenimports += collect_submodules('satochip') 
 hiddenimports += collect_submodules('smartcard') 
 hiddenimports += collect_submodules('ckcc')
+hiddenimports += collect_submodules('bitbox02')
 hiddenimports += ['_scrypt', 'PyQt5.QtPrintSupport']  # needed by Revealer
 
-# safetlib imports PyQt5.Qt.  We use a local updated copy of pinmatrix.py until they
-# release a new version that includes https://github.com/archos-safe-t/python-safet/commit/b1eab3dba4c04fdfc1fcf17b66662c28c5f2380e
-hiddenimports.remove('safetlib.qt.pinmatrix')
 
-
-# Add libusb binary
-binaries = [(PYHOME+"/libusb-1.0.dll", ".")]
+binaries = []
 
 # Workaround for "Retro Look":
 binaries += [b for b in collect_dynamic_libs('PyQt5') if 'qwindowsvista' in b[0]]
 
-binaries += [('C:/tmp/libsecp256k1.dll', '.')]
+binaries += [('C:/tmp/libsecp256k1-0.dll', '.')]
+binaries += [('C:/tmp/libusb-1.0.dll', '.')]
+binaries += [('C:/tmp/libzbar-0.dll', '.')]
 
 # pyscard binaries for Satochip
 binaries += [('C:/python*/Lib/site-packages/smartcard/scard/_scard.cp36-win32.pyd', '.')] #satochip
 
 datas = [
     (home+'electrum_ltc/*.json', 'electrum_ltc'),
+    (home+'electrum_ltc/lnwire/*.csv', 'electrum_ltc/lnwire'),
     (home+'electrum_ltc/wordlist/english.txt', 'electrum_ltc/wordlist'),
     (home+'electrum_ltc/locale', 'electrum_ltc/locale'),
     (home+'electrum_ltc/plugins', 'electrum_ltc/plugins'),
-    ('C:\\Program Files (x86)\\ZBar\\bin\\', '.'),
     (home+'electrum_ltc/gui/icons', 'electrum_ltc/gui/icons'),
 ]
 datas += collect_data_files('trezorlib')
@@ -55,8 +54,7 @@ datas += collect_data_files('safetlib')
 datas += collect_data_files('btchip')
 datas += collect_data_files('keepkeylib')
 datas += collect_data_files('ckcc')
-datas += collect_data_files('jsonrpcserver')
-datas += collect_data_files('jsonrpcclient')
+datas += collect_data_files('bitbox02')
 
 # We don't put these files in to actually include them in the script but to make the Analysis method scan them for imports
 a = Analysis([home+'run_electrum',
@@ -148,7 +146,7 @@ exe_portable = EXE(
 #####
 # exe and separate files that NSIS uses to build installer "setup" exe
 
-exe_dependent = EXE(
+exe_inside_setup_noconsole = EXE(
     pyz,
     a.scripts,
     exclude_binaries=True,
@@ -159,8 +157,20 @@ exe_dependent = EXE(
     icon=home+'electrum_ltc/gui/icons/electrum.ico',
     console=False)
 
+exe_inside_setup_console = EXE(
+    pyz,
+    a.scripts,
+    exclude_binaries=True,
+    name=os.path.join('build\\pyi.win32\\electrum-ltc', cmdline_name+"-debug"),
+    debug=False,
+    strip=None,
+    upx=False,
+    icon=home+'electrum_ltc/gui/icons/electrum.ico',
+    console=True)
+
 coll = COLLECT(
-    exe_dependent,
+    exe_inside_setup_noconsole,
+    exe_inside_setup_console,
     a.binaries,
     a.zipfiles,
     a.datas,

@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 from kivy.factory import Factory
 from kivy.lang import Builder
 from kivy.core.clipboard import Clipboard
@@ -6,14 +8,19 @@ from kivy.clock import Clock
 
 from electrum_ltc.gui.kivy.i18n import _
 
+if TYPE_CHECKING:
+    from ...main_window import ElectrumWindow
+
 
 Builder.load_string('''
+#:import KIVY_GUI_PATH electrum_ltc.gui.kivy.KIVY_GUI_PATH
+
 <QRDialog@Popup>
     id: popup
     title: ''
     data: ''
     shaded: False
-    show_text: False
+    help_text: ''
     AnchorLayout:
         anchor_x: 'center'
         BoxLayout:
@@ -29,7 +36,7 @@ Builder.load_string('''
                     touch = args[1]
                     if self.collide_point(*touch.pos): self.shaded = not self.shaded
             TopLabel:
-                text: root.data if root.show_text else ''
+                text: root.help_text
             Widget:
                 size_hint: 1, 0.2
             BoxLayout:
@@ -42,10 +49,10 @@ Builder.load_string('''
                     on_release:
                         root.copy_to_clipboard()
                 IconButton:
-                    icon: 'atlas://electrum_ltc/gui/kivy/theming/light/share'
+                    icon: f'atlas://{KIVY_GUI_PATH}/theming/light/share'
                     size_hint: 0.6, None
                     height: '48dp'
-                    on_release: s.parent.do_share()
+                    on_release: root.do_share()
                 Button:
                     size_hint: 1, None
                     height: '48dp'
@@ -56,12 +63,12 @@ Builder.load_string('''
 
 class QRDialog(Factory.Popup):
     def __init__(self, title, data, show_text, *,
-                 failure_cb=None, text_for_clipboard=None):
+                 failure_cb=None, text_for_clipboard=None, help_text=None):
         Factory.Popup.__init__(self)
-        self.app = App.get_running_app()
+        self.app = App.get_running_app()  # type: ElectrumWindow
         self.title = title
         self.data = data
-        self.show_text = show_text
+        self.help_text = (data if show_text else help_text) or ''
         self.failure_cb = failure_cb
         self.text_for_clipboard = text_for_clipboard if text_for_clipboard else data
 
@@ -72,3 +79,7 @@ class QRDialog(Factory.Popup):
         Clipboard.copy(self.text_for_clipboard)
         msg = _('Text copied to clipboard.')
         Clock.schedule_once(lambda dt: self.app.show_info(msg))
+
+    def do_share(self):
+        self.app.do_share(self.text_for_clipboard, self.title)
+        self.dismiss()

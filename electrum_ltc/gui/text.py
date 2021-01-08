@@ -6,23 +6,32 @@ import locale
 from decimal import Decimal
 import getpass
 import logging
+from typing import TYPE_CHECKING
 
 import electrum_ltc as electrum
+from electrum_ltc import util
 from electrum_ltc.util import format_satoshis
-from electrum_ltc.bitcoin import is_address, COIN, TYPE_ADDRESS
-from electrum_ltc.transaction import TxOutput
+from electrum_ltc.bitcoin import is_address, COIN
+from electrum_ltc.transaction import PartialTxOutput
 from electrum_ltc.wallet import Wallet
+from electrum_ltc.wallet_db import WalletDB
 from electrum_ltc.storage import WalletStorage
 from electrum_ltc.network import NetworkParameters, TxBroadcastError, BestEffortRequestFailed
-from electrum_ltc.interface import deserialize_server
+from electrum_ltc.interface import ServerAddr
 from electrum_ltc.logging import console_stderr_handler
+
+if TYPE_CHECKING:
+    from electrum_ltc.daemon import Daemon
+    from electrum_ltc.simple_config import SimpleConfig
+    from electrum_ltc.plugin import Plugins
+
 
 _ = lambda x:x  # i18n
 
 
 class ElectrumGui:
 
-    def __init__(self, config, daemon, plugins):
+    def __init__(self, config: 'SimpleConfig', daemon: 'Daemon', plugins: 'Plugins'):
 
         self.config = config
         self.network = daemon.network
@@ -33,7 +42,8 @@ class ElectrumGui:
         if storage.is_encrypted():
             password = getpass.getpass('Password:', stream=None)
             storage.decrypt(password)
-        self.wallet = Wallet(storage, config=config)
+        db = WalletDB(storage.read(), manual_upgrades=False)
+        self.wallet = Wallet(db, storage, config=config)
         self.wallet.start_network(self.network)
         self.contacts = self.wallet.contacts
 
@@ -65,8 +75,7 @@ class ElectrumGui:
         self.str_fee = ""
         self.history = None
 
-        if self.network:
-            self.network.register_callback(self.update, ['wallet_updated', 'network_updated'])
+        util.register_callback(self.update, ['wallet_updated', 'network_updated'])
 
         self.tab_names = [_("History"), _("Send"), _("Receive"), _("Addresses"), _("Contacts"), _("Banner")]
         self.num_tabs = len(self.tab_names)
@@ -127,10 +136,10 @@ class ElectrumGui:
             else:
                 time_str = 'unconfirmed'
 
-            label = self.wallet.get_label(hist_item.txid)
+            label = self.wallet.get_label_for_txid(hist_item.txid)
             if len(label) > 40:
                 label = label[0:37] + '...'
-            self.history.append(format_str % (time_str, label, format_satoshis(hist_item.value, whitespaces=True),
+            self.history.append(format_str % (time_str, label, format_satoshis(hist_item.delta, whitespaces=True),
                                               format_satoshis(hist_item.balance, whitespaces=True)))
 
 
@@ -168,7 +177,7 @@ class ElectrumGui:
 
     def print_addresses(self):
         fmt = "%-35s  %-30s"
-        messages = map(lambda addr: fmt % (addr, self.wallet.labels.get(addr,"")), self.wallet.get_addresses())
+        messages = map(lambda addr: fmt % (addr, self.wallet.get_label(addr)), self.wallet.get_addresses())
         self.print_list(messages,   fmt % ("Address", "Label"))
 
     def print_edit_line(self, y, label, text, index, size):
@@ -305,7 +314,7 @@ class ElectrumGui:
             elif out == "Edit label":
                 s = self.get_string(6 + self.pos, 18)
                 if s:
-                    self.wallet.labels[key] = s
+                    self.wallet.set_label(key, s)
 
     def run_banner_tab(self, c):
         self.show_message(repr(c))
@@ -331,6 +340,8 @@ class ElectrumGui:
             curses.echo()
             curses.endwin()
 
+    def stop(self):
+        pass
 
     def do_clear(self):
         self.str_amount = ''
@@ -360,14 +371,15 @@ class ElectrumGui:
         else:
             password = None
         try:
-            tx = self.wallet.mktx([TxOutput(TYPE_ADDRESS, self.str_recipient, amount)],
-                                  password, self.config, fee)
+            tx = self.wallet.mktx(outputs=[PartialTxOutput.from_address_and_value(self.str_recipient, amount)],
+                                  password=password,
+                                  fee=fee)
         except Exception as e:
             self.show_message(repr(e))
             return
 
         if self.str_description:
-            self.wallet.labels[tx.txid()] = self.str_description
+            self.wallet.set_label(tx.txid(), self.str_description)
 
         self.show_message(_("Please wait..."), getchar=False)
         try:
@@ -399,26 +411,28 @@ class ElectrumGui:
         if not self.network:
             return
         net_params = self.network.get_parameters()
-        host, port, protocol = net_params.host, net_params.port, net_params.protocol
+        server_addr = net_params.server
         proxy_config, auto_connect = net_params.proxy, net_params.auto_connect
-        srv = 'auto-connect' if auto_connect else self.network.default_server
+        srv = 'auto-connect' if auto_connect else str(self.network.default_server)
         out = self.run_dialog('Network', [
             {'label':'server', 'type':'str', 'value':srv},
             {'label':'proxy', 'type':'str', 'value':self.config.get('proxy', '')},
             ], buttons = 1)
         if out:
             if out.get('server'):
-                server = out.get('server')
-                auto_connect = server == 'auto-connect'
+                server_str = out.get('server')
+                auto_connect = server_str == 'auto-connect'
                 if not auto_connect:
                     try:
-                        host, port, protocol = deserialize_server(server)
+                        server_addr = ServerAddr.from_str(server_str)
                     except Exception:
-                        self.show_message("Error:" + server + "\nIn doubt, type \"auto-connect\"")
+                        self.show_message("Error:" + server_str + "\nIn doubt, type \"auto-connect\"")
                         return False
             if out.get('server') or out.get('proxy'):
                 proxy = electrum.network.deserialize_proxy(out.get('proxy')) if out.get('proxy') else proxy_config
-                net_params = NetworkParameters(host, port, protocol, proxy, auto_connect)
+                net_params = NetworkParameters(server=server_addr,
+                                               proxy=proxy,
+                                               auto_connect=auto_connect)
                 self.network.run_from_another_thread(self.network.set_parameters(net_params))
 
     def settings_dialog(self):

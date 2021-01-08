@@ -1,9 +1,15 @@
+from typing import TYPE_CHECKING
+
 from kivy.app import App
 from kivy.factory import Factory
 from kivy.properties import ObjectProperty
 from kivy.lang import Builder
 
 from electrum_ltc.gui.kivy.i18n import _
+
+if TYPE_CHECKING:
+    from ...main_window import ElectrumWindow
+
 
 Builder.load_string('''
 <BumpFeeDialog@Popup>
@@ -68,7 +74,7 @@ Builder.load_string('''
 
 class BumpFeeDialog(Factory.Popup):
 
-    def __init__(self, app, fee, size, callback):
+    def __init__(self, app: 'ElectrumWindow', fee, size, callback):
         Factory.Popup.__init__(self)
         self.app = app
         self.init_fee = fee

@@ -2,6 +2,7 @@
 from functools import partial
 import threading
 import os
+from typing import TYPE_CHECKING
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -24,15 +25,16 @@ from . import EventsDialog
 from ...i18n import _
 from .password_dialog import PasswordDialog
 
+if TYPE_CHECKING:
+    from electrum_ltc.gui.kivy.main_window import ElectrumWindow
+
+
 # global Variables
-is_test = (platform == "linux")
-test_seed = "grape impose jazz bind spatial mind jelly tourist tank today holiday stomach"
-test_seed = "time taxi field recycle tiny license olive virus report rare steel portion achieve"
-test_xpub = "xpub661MyMwAqRbcEbvVtRRSjqxVnaWVUMewVzMiURAKyYratih4TtBpMypzzefmv8zUNebmNVzB3PojdC5sV2P9bDgMoo9B3SARw1MXUUfU1GL"
 
 Builder.load_string('''
 #:import Window kivy.core.window.Window
 #:import _ electrum_ltc.gui.kivy.i18n._
+#:import KIVY_GUI_PATH electrum_ltc.gui.kivy.KIVY_GUI_PATH
 
 
 <WizardTextInput@TextInput>
@@ -42,8 +44,8 @@ Builder.load_string('''
     background_color: (1, 1, 1, 1) if self.focus else (0.454, 0.698, 0.909, 1)
     foreground_color: (0.31, 0.31, 0.31, 1) if self.focus else (0.835, 0.909, 0.972, 1)
     hint_text_color: self.foreground_color
-    background_active: 'atlas://electrum_ltc/gui/kivy/theming/light/create_act_text_active'
-    background_normal: 'atlas://electrum_ltc/gui/kivy/theming/light/create_act_text_active'
+    background_active: f'atlas://{KIVY_GUI_PATH}/theming/light/create_act_text_active'
+    background_normal: f'atlas://{KIVY_GUI_PATH}/theming/light/create_act_text_active'
     size_hint_y: None
     height: '48sp'
 
@@ -92,7 +94,7 @@ Builder.load_string('''
                 size_hint: 1, None
                 height: self.texture_size[1] if self.opacity else 0
                 font_size: '33sp'
-                font_name: 'electrum_ltc/gui/kivy/data/fonts/tron/Tr2n.ttf'
+                font_name: f'{KIVY_GUI_PATH}/data/fonts/tron/Tr2n.ttf'
         GridLayout:
             cols: 1
             id: crcontent
@@ -149,6 +151,18 @@ Builder.load_string('''
             range: 1, n.value
             step: 1
             value: 2
+    Widget
+        size_hint: 1, 1
+    Label:
+        id: backup_warning_label
+        color: root.text_color
+        size_hint: 1, None
+        text_size: self.width, None
+        height: self.texture_size[1]
+        opacity: int(m.value != n.value)
+        text: _("Warning: to be able to restore a multisig wallet, " \
+                "you should include the master public key for each cosigner " \
+                "in all of your backups.")
 
 
 <WizardChoiceDialog>
@@ -290,7 +304,7 @@ Builder.load_string('''
     width: self.texture_size[0]
     height: '30dp'
     on_release:
-        self.parent.new_word(self.text)
+        if self.parent: self.parent.new_word(self.text)
 
 
 <SeedButton@Button>:
@@ -301,7 +315,7 @@ Builder.load_string('''
     font_size: '18dp'
     text_size: self.width - dp(24), self.height - dp(12)
     color: .1, .1, .1, 1
-    background_normal: 'atlas://electrum_ltc/gui/kivy/theming/light/white_bg_round_top'
+    background_normal: f'atlas://{KIVY_GUI_PATH}/theming/light/white_bg_round_top'
     background_down: self.background_normal
     size_hint_y: None
 
@@ -330,7 +344,7 @@ Builder.load_string('''
         height: '30dp'
         width: '30dp'
         size_hint: 1, None
-        icon: 'atlas://electrum_ltc/gui/kivy/theming/light/gear'
+        icon: f'atlas://{KIVY_GUI_PATH}/theming/light/gear'
         on_release:
             root.options_dialog() if root.options_dialog else None
 
@@ -466,7 +480,7 @@ Builder.load_string('''
             id: scan
             height: '48sp'
             on_release: root.scan_xpub()
-            icon: 'atlas://electrum_ltc/gui/kivy/theming/light/camera'
+            icon: f'atlas://{KIVY_GUI_PATH}/theming/light/camera'
             size_hint: 1, None
         WizardButton:
             text: _('Paste')
@@ -577,7 +591,7 @@ class WizardDialog(EventsDialog):
         self.app = App.get_running_app()
         self.run_next = kwargs['run_next']
 
-        self._trigger_size_dialog = Clock.create_trigger(self._size_dialog)
+        self._trigger_size_dialog = Clock.create_trigger(self._size_dialog, -1)
         # note: everything bound here needs to be unbound as otherwise the
         # objects will be kept around and keep receiving the callbacks
         Window.bind(size=self._trigger_size_dialog,
@@ -587,12 +601,11 @@ class WizardDialog(EventsDialog):
         self._on_release = False
 
     def _size_dialog(self, dt):
-        app = App.get_running_app()
-        if app.ui_mode[0] == 'p':
+        if self.app.ui_mode[0] == 'p':
             self.size = Window.size
         else:
             #tablet
-            if app.orientation[0] == 'p':
+            if self.app.orientation[0] == 'p':
                 #portrait
                 self.size = Window.size[0]/1.67, Window.size[1]/1.4
             else:
@@ -607,12 +620,12 @@ class WizardDialog(EventsDialog):
     def on_keyboard(self, instance, key, keycode, codepoint, modifier):
         if key == 27:
             if self.wizard.can_go_back():
+                self.dismiss()
                 self.wizard.go_back()
             else:
-                app = App.get_running_app()
-                if not app.is_exit:
-                    app.is_exit = True
-                    app.show_info(_('Press again to exit'))
+                if not self.app.is_exit:
+                    self.app.is_exit = True
+                    self.app.show_info(_('Press again to exit'))
                 else:
                     self._on_release = False
                     self.dismiss()
@@ -622,18 +635,19 @@ class WizardDialog(EventsDialog):
         Window.unbind(size=self._trigger_size_dialog,
                       rotation=self._trigger_size_dialog,
                       on_keyboard=self.on_keyboard)
-        app = App.get_running_app()
-        if app.wallet is None and not self._on_release:
-            app.stop()
+        if self.app.wallet is None and not self._on_release:
+            self.app.stop()
 
     def get_params(self, button):
         return (None,)
 
     def on_release(self, button):
+        if self._on_release is True:
+            return
         self._on_release = True
-        self.close()
+        self.dismiss()
         if not button:
-            self.parent.dispatch('on_wizard_complete', None)
+            self.wizard.terminate(aborted=True)
             return
         if button is self.ids.back:
             self.wizard.go_back()
@@ -712,7 +726,6 @@ class WizardTOSDialog(WizardDialog):
         self.ids.next.text = 'Accept'
         self.ids.next.disabled = False
         self.message = kwargs['tos']
-        self.message2 = _('Enter your email address:')
 
 class WizardEmailDialog(WizardDialog):
 
@@ -737,8 +750,7 @@ class WizardConfirmDialog(WizardDialog):
 
     def on_parent(self, instance, value):
         if value:
-            app = App.get_running_app()
-            self._back = _back = partial(app.dispatch, 'on_back')
+            self._back = _back = partial(self.app.dispatch, 'on_back')
 
     def get_params(self, button):
         return (True,)
@@ -765,8 +777,7 @@ class WizardChoiceDialog(WizardDialog):
 
     def on_parent(self, instance, value):
         if value:
-            app = App.get_running_app()
-            self._back = _back = partial(app.dispatch, 'on_back')
+            self._back = _back = partial(self.app.dispatch, 'on_back')
 
     def get_params(self, button):
         return (button.action,)
@@ -832,7 +843,6 @@ class ShowSeedDialog(WizardDialog):
 
     def on_parent(self, instance, value):
         if value:
-            app = App.get_running_app()
             self._back = _back = partial(self.ids.back.dispatch, 'on_release')
 
     def options_dialog(self):
@@ -859,21 +869,23 @@ class RestoreSeedDialog(WizardDialog):
         super(RestoreSeedDialog, self).__init__(wizard, **kwargs)
         self._test = kwargs['test']
         from electrum_ltc.mnemonic import Mnemonic
-        from electrum_ltc.old_mnemonic import words as old_wordlist
+        from electrum_ltc.old_mnemonic import wordlist as old_wordlist
         self.words = set(Mnemonic('en').wordlist).union(set(old_wordlist))
-        self.ids.text_input_seed.text = test_seed if is_test else ''
+        self.ids.text_input_seed.text = ''
         self.message = _('Please type your seed phrase using the virtual keyboard.')
         self.title = _('Enter Seed')
-        self.ext = False
-        self.bip39 = False
+        self.opt_ext = kwargs['opt_ext']
+        self.opt_bip39 = kwargs['opt_bip39']
+        self.is_ext = False
+        self.is_bip39 = False
 
     def options_dialog(self):
         from .seed_options import SeedOptionsDialog
         def callback(ext, bip39):
-            self.ext = ext
-            self.bip39 = bip39
+            self.is_ext = ext
+            self.is_bip39 = bip39
             self.update_next_button()
-        d = SeedOptionsDialog(self.ext, self.bip39, callback)
+        d = SeedOptionsDialog(self.opt_ext, self.opt_bip39, self.is_ext, self.is_bip39, callback)
         d.open()
 
     def get_suggestions(self, prefix):
@@ -882,7 +894,13 @@ class RestoreSeedDialog(WizardDialog):
                 yield w
 
     def update_next_button(self):
-        self.ids.next.disabled = False if self.bip39 else not bool(self._test(self.get_text()))
+        from electrum_ltc.keystore import bip39_is_checksum_valid
+        text = self.get_text()
+        if self.is_bip39:
+            is_seed, is_wordlist = bip39_is_checksum_valid(text)
+        else:
+            is_seed = bool(self._test(text))
+        self.ids.next.disabled = not is_seed
 
     def on_text(self, dt):
         self.update_next_button()
@@ -950,7 +968,6 @@ class RestoreSeedDialog(WizardDialog):
             #tis._keyboard.bind(on_key_down=self.on_key_down)
             self._back = _back = partial(self.ids.back.dispatch,
                                          'on_release')
-            app = App.get_running_app()
 
     def on_key_down(self, keyboard, keycode, key, modifiers):
         if keycode[0] in (13, 271):
@@ -971,7 +988,7 @@ class RestoreSeedDialog(WizardDialog):
             tis.focus = False
 
     def get_params(self, b):
-        return (self.get_text(), self.bip39, self.ext)
+        return (self.get_text(), self.is_bip39, self.is_ext)
 
 
 class ConfirmSeedDialog(RestoreSeedDialog):
@@ -979,6 +996,7 @@ class ConfirmSeedDialog(RestoreSeedDialog):
     def __init__(self, *args, **kwargs):
         RestoreSeedDialog.__init__(self, *args, **kwargs)
         self.ids.seed_dialog_header.ids.options_button.disabled = True
+        self.ids.text_input_seed.text = kwargs['seed']
 
     def get_params(self, b):
         return (self.get_text(),)
@@ -1038,7 +1056,7 @@ class AddXpubDialog(WizardDialog):
         self.app.scan_qr(on_complete)
 
     def do_paste(self):
-        self.ids.text_input.text = test_xpub if is_test else self.app._clipboard.paste()
+        self.ids.text_input.text = self.app._clipboard.paste()
 
     def do_clear(self):
         self.ids.text_input.text = ''
@@ -1047,49 +1065,23 @@ class AddXpubDialog(WizardDialog):
 
 
 class InstallWizard(BaseWizard, Widget):
-    '''
-    events::
-        `on_wizard_complete` Fired when the wizard is done creating/ restoring
-        wallet/s.
-    '''
 
-    __events__ = ('on_wizard_complete', )
+    def __init__(self, *args, **kwargs):
+        BaseWizard.__init__(self, *args, **kwargs)
+        self.app = App.get_running_app()
 
-    def on_wizard_complete(self, wallet):
-        """overriden by main_window"""
-        pass
-
-    def waiting_dialog(self, task, msg, on_finished=None):
-        '''Perform a blocking task in the background by running the passed
-        method in a thread.
-        '''
-        def target():
-            # run your threaded function
-            try:
-                task()
-            except Exception as err:
-                self.show_error(str(err))
-            # on  completion hide message
-            Clock.schedule_once(lambda dt: app.info_bubble.hide(now=True), -1)
-            if on_finished:
-                def protected_on_finished():
-                    try:
-                        on_finished()
-                    except Exception as e:
-                        self.show_error(str(e))
-                Clock.schedule_once(lambda dt: protected_on_finished(), -1)
-
-        app = App.get_running_app()
-        app.show_info_bubble(
-            text=msg, icon='atlas://electrum_ltc/gui/kivy/theming/light/important',
-            pos=Window.center, width='200sp', arrow_pos=None, modal=True)
-        t = threading.Thread(target = target)
-        t.start()
-
-    def terminate(self, *, storage=None, aborted=False):
-        if storage is None and not aborted:
-            storage = self.create_storage(self.path)
-        self.dispatch('on_wizard_complete', storage)
+    def terminate(self, *, storage=None, db=None, aborted=False):
+        # storage must be None because manual upgrades are disabled on Kivy
+        assert storage is None
+        if not aborted:
+            password = self.pw_args.password
+            storage, db = self.create_storage(self.path)
+            self.app.on_wizard_success(storage, db, password)
+        else:
+            try: os.unlink(self.path)
+            except FileNotFoundError: pass
+            self.reset_stack()
+            self.confirm_dialog(message=_('Wallet creation failed'), run_next=lambda x: self.app.on_wizard_aborted())
 
     def choice_dialog(self, **kwargs):
         choices = kwargs['choices']
@@ -1102,7 +1094,7 @@ class InstallWizard(BaseWizard, Widget):
     def multisig_dialog(self, **kwargs): WizardMultisigDialog(self, **kwargs).open()
     def show_seed_dialog(self, **kwargs): ShowSeedDialog(self, **kwargs).open()
     def line_dialog(self, **kwargs): LineDialog(self, **kwargs).open()
-    def choice_and_line_dialog(self, **kwargs): ChoiceLineDialog(self, **kwargs).open()
+    def derivation_and_script_type_gui_specific_dialog(self, **kwargs): ChoiceLineDialog(self, **kwargs).open()
 
     def confirm_seed_dialog(self, **kwargs):
         kwargs['title'] = _('Confirm Seed')
@@ -1110,6 +1102,8 @@ class InstallWizard(BaseWizard, Widget):
         ConfirmSeedDialog(self, **kwargs).open()
 
     def restore_seed_dialog(self, **kwargs):
+        kwargs['opt_bip39'] = self.opt_bip39
+        kwargs['opt_ext'] = self.opt_ext
         RestoreSeedDialog(self, **kwargs).open()
 
     def confirm_dialog(self, **kwargs):
@@ -1141,23 +1135,27 @@ class InstallWizard(BaseWizard, Widget):
     def show_message(self, msg): self.show_error(msg)
 
     def show_error(self, msg):
-        app = App.get_running_app()
-        Clock.schedule_once(lambda dt: app.show_error(msg))
+        Clock.schedule_once(lambda dt: self.app.show_error(msg))
 
     def request_password(self, run_next, force_disable_encrypt_cb=False):
         if force_disable_encrypt_cb:
             # do not request PIN for watching-only wallets
             run_next(None, False)
             return
-        def on_success(old_pin, pin):
-            assert old_pin is None
-            run_next(pin, False)
+        def on_success(old_pw, pw):
+            assert old_pw is None
+            run_next(pw, True)
         def on_failure():
-            self.show_error(_('PIN mismatch'))
-            self.run('request_password', run_next)
-        popup = PasswordDialog()
-        app = App.get_running_app()
-        popup.init(app, None, _('Choose PIN code'), on_success, on_failure, is_change=2)
+            self.show_error(_('Password mismatch'))
+            self.request_password(run_next)
+        popup = PasswordDialog(
+            self.app,
+            check_password=lambda x:True,
+            on_success=on_success,
+            on_failure=on_failure,
+            is_change=True,
+            is_password=True,
+            message=_('Choose a password'))
         popup.open()
 
     def action_dialog(self, action, run_next):

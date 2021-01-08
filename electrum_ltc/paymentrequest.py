@@ -25,7 +25,7 @@
 import hashlib
 import sys
 import time
-from typing import Optional
+from typing import Optional, List, TYPE_CHECKING
 import asyncio
 import urllib.parse
 
@@ -36,16 +36,20 @@ import aiohttp
 try:
     from . import paymentrequest_pb2 as pb2
 except ImportError:
+    # sudo apt-get install protobuf-compiler
     sys.exit("Error: could not find paymentrequest_pb2.py. Create it with 'protoc --proto_path=electrum_ltc/ --python_out=electrum_ltc/ electrum_ltc/paymentrequest.proto'")
 
 from . import bitcoin, ecc, util, transaction, x509, rsakey
-from .util import bh2u, bfh, export_meta, import_meta, make_aiohttp_session
-from .util import PR_UNPAID, PR_EXPIRED, PR_PAID, PR_UNKNOWN, PR_INFLIGHT
+from .util import bh2u, bfh, make_aiohttp_session
+from .invoices import OnchainInvoice
 from .crypto import sha256
-from .bitcoin import TYPE_ADDRESS
-from .transaction import TxOutput
+from .bitcoin import address_to_script
+from .transaction import PartialTxOutput
 from .network import Network
 from .logging import get_logger, Logger
+
+if TYPE_CHECKING:
+    from .simple_config import SimpleConfig
 
 
 _logger = get_logger(__name__)
@@ -128,7 +132,7 @@ class PaymentRequest:
         return str(self.raw)
 
     def parse(self, r):
-        self.outputs = []
+        self.outputs = []  # type: List[PartialTxOutput]
         if self.error:
             return
         self.id = bh2u(sha256(r)[0:16])
@@ -141,12 +145,12 @@ class PaymentRequest:
         self.details = pb2.PaymentDetails()
         self.details.ParseFromString(self.data.serialized_payment_details)
         for o in self.details.outputs:
-            type_, addr = transaction.get_address_from_output_script(o.script)
-            if type_ != TYPE_ADDRESS:
+            addr = transaction.get_address_from_output_script(o.script)
+            if not addr:
                 # TODO maybe rm restriction but then get_requestor and get_id need changes
                 self.error = "only addresses are allowed as outputs"
                 return
-            self.outputs.append(TxOutput(type_, addr, o.amount))
+            self.outputs.append(PartialTxOutput.from_address_and_value(addr, o.amount))
         self.memo = self.details.memo
         self.payment_url = self.details.payment_url
 
@@ -252,8 +256,9 @@ class PaymentRequest:
 
     def get_address(self):
         o = self.outputs[0]
-        assert o.type == TYPE_ADDRESS
-        return o.address
+        addr = o.address
+        assert addr
+        return addr
 
     def get_requestor(self):
         return self.requestor if self.requestor else self.get_address()
@@ -278,7 +283,7 @@ class PaymentRequest:
         paymnt.merchant_data = pay_det.merchant_data
         paymnt.transactions.append(bfh(raw_tx))
         ref_out = paymnt.refund_to.add()
-        ref_out.script = util.bfh(transaction.Transaction.pay_script(TYPE_ADDRESS, refund_addr))
+        ref_out.script = util.bfh(address_to_script(refund_addr))
         paymnt.memo = "Paid using Electrum"
         pm = paymnt.SerializeToString()
         payurl = urllib.parse.urlparse(pay_det.payment_url)
@@ -313,20 +318,19 @@ class PaymentRequest:
             return False, error
 
 
-def make_unsigned_request(req):
-    from .transaction import Transaction
-    addr = req['address']
-    time = req.get('time', 0)
-    exp = req.get('exp', 0)
+def make_unsigned_request(req: 'OnchainInvoice'):
+    addr = req.get_address()
+    time = req.time
+    exp = req.exp
     if time and type(time) != int:
         time = 0
     if exp and type(exp) != int:
         exp = 0
-    amount = req['amount']
+    amount = req.amount_sat
     if amount is None:
         amount = 0
-    memo = req['memo']
-    script = bfh(Transaction.pay_script(TYPE_ADDRESS, addr))
+    memo = req.message
+    script = bfh(address_to_script(addr))
     outputs = [(script, amount)]
     pd = pb2.PaymentDetails()
     for script, amount in outputs:
@@ -442,7 +446,7 @@ def sign_request_with_x509(pr, key_path, cert_path):
     pr.signature = bytes(sig)
 
 
-def serialize_request(req):
+def serialize_request(req):  # FIXME this is broken
     pr = make_unsigned_request(req)
     signature = req.get('sig')
     requestor = req.get('name')
@@ -453,7 +457,7 @@ def serialize_request(req):
     return pr
 
 
-def make_request(config, req):
+def make_request(config: 'SimpleConfig', req: 'OnchainInvoice'):
     pr = make_unsigned_request(req)
     key_path = config.get('ssl_keyfile')
     cert_path = config.get('ssl_certfile')

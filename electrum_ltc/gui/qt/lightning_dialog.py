@@ -23,84 +23,61 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from PyQt5.QtGui import QStandardItemModel, QStandardItem
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (QDialog, QWidget, QLabel, QVBoxLayout, QCheckBox,
-                             QGridLayout, QPushButton, QLineEdit, QTabWidget)
+from typing import TYPE_CHECKING
 
+from PyQt5.QtWidgets import (QDialog, QLabel, QVBoxLayout, QPushButton)
+
+from electrum_ltc import util
 from electrum_ltc.i18n import _
-from .util import HelpLabel, MyTreeView, Buttons
 
+from .util import Buttons
 
-class WatcherList(MyTreeView):
-    def __init__(self, parent):
-        super().__init__(parent, self.create_menu, stretch_column=0, editable_columns=[])
-        self.setModel(QStandardItemModel(self))
-        self.setSortingEnabled(True)
-        self.update()
-
-    def create_menu(self, x):
-        pass
-
-    def update(self):
-        if self.parent.lnwatcher is None:
-            return
-        self.model().clear()
-        self.update_headers({0:_('Outpoint'), 1:_('Tx'), 2:_('Status')})
-        lnwatcher = self.parent.lnwatcher
-        l = lnwatcher.list_sweep_tx()
-        for outpoint in l:
-            n = lnwatcher.get_num_tx(outpoint)
-            status = lnwatcher.get_channel_status(outpoint)
-            items = [QStandardItem(e) for e in [outpoint, "%d"%n, status]]
-            self.model().insertRow(self.model().rowCount(), items)
+if TYPE_CHECKING:
+    from . import ElectrumGui
 
 
 class LightningDialog(QDialog):
 
-    def __init__(self, gui_object):
+    def __init__(self, gui_object: 'ElectrumGui'):
         QDialog.__init__(self)
         self.gui_object = gui_object
         self.config = gui_object.config
         self.network = gui_object.daemon.network
-        self.lnwatcher = self.network.local_watchtower
-        self.setWindowTitle(_('Lightning'))
-        self.setMinimumSize(600, 20)
-        self.watcher_list = WatcherList(self)
-        # channel_db
-        network_w = QWidget()
-        network_vbox = QVBoxLayout(network_w)
-        self.num_peers = QLabel('')
-        network_vbox.addWidget(self.num_peers)
-        self.num_nodes = QLabel('')
-        network_vbox.addWidget(self.num_nodes)
-        self.num_channels = QLabel('')
-        network_vbox.addWidget(self.num_channels)
-        self.status = QLabel('')
-        network_vbox.addWidget(self.status)
-        network_vbox.addStretch(1)
-        # watchtower
-        watcher_w = QWidget()
-        watcher_vbox = QVBoxLayout(watcher_w)
-        watcher_vbox.addWidget(self.watcher_list)
-
-        # tabs
-        tabs = QTabWidget()
-        tabs.addTab(network_w, _('Network'))
-        tabs.addTab(watcher_w, _('Watchtower'))
+        assert self.network
+        self.setWindowTitle(_('Lightning Network'))
+        self.setMinimumWidth(600)
         vbox = QVBoxLayout(self)
-        vbox.addWidget(tabs)
+        self.num_peers = QLabel('')
+        vbox.addWidget(self.num_peers)
+        self.num_nodes = QLabel('')
+        vbox.addWidget(self.num_nodes)
+        self.num_channels = QLabel('')
+        vbox.addWidget(self.num_channels)
+        self.status = QLabel('')
+        vbox.addWidget(self.status)
+        vbox.addStretch(1)
         b = QPushButton(_('Close'))
         b.clicked.connect(self.close)
         vbox.addLayout(Buttons(b))
-        self.watcher_list.update()
-        self.network.register_callback(self.update_status, ['ln_status'])
+        util.register_callback(self.on_channel_db, ['channel_db'])
+        util.register_callback(self.set_num_peers, ['gossip_peers'])
+        util.register_callback(self.set_unknown_channels, ['unknown_channels'])
+        self.network.channel_db.update_counts() # trigger callback
+        if self.network.lngossip:
+            self.set_num_peers('', self.network.lngossip.num_peers())
+            self.set_unknown_channels('', len(self.network.lngossip.unknown_ids))
+        else:
+            self.num_peers.setText(_('Lightning gossip not active.'))
 
-    def update_status(self, event, num_peers, num_nodes, known, unknown):
-        self.num_peers.setText(_(f'Connected to {num_peers} peers'))
-        self.num_nodes.setText(_(f'{num_nodes} nodes'))
-        self.num_channels.setText(_(f'{known} channels'))
-        self.status.setText(_(f'Requesting {unknown} channels...') if unknown else '')
+    def on_channel_db(self, event, num_nodes, num_channels, num_policies):
+        self.num_nodes.setText(_('{} nodes').format(num_nodes))
+        self.num_channels.setText(_('{} channels').format(num_channels))
+
+    def set_num_peers(self, event, num_peers):
+        self.num_peers.setText(_('Connected to {} peers').format(num_peers))
+
+    def set_unknown_channels(self, event, unknown):
+        self.status.setText(_('Requesting {} channels...').format(unknown) if unknown else '')
 
     def is_hidden(self):
         return self.isMinimized() or self.isHidden()
@@ -116,5 +93,5 @@ class LightningDialog(QDialog):
         self.raise_()
 
     def closeEvent(self, event):
-        self.gui_object.watchtower_window = None
+        self.gui_object.lightning_dialog = None
         event.accept()

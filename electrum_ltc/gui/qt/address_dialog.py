@@ -64,7 +64,7 @@ class AddressDialog(WindowModalDialog):
         vbox = QVBoxLayout()
         self.setLayout(vbox)
 
-        vbox.addWidget(QLabel(_("Address:")))
+        vbox.addWidget(QLabel(_("Address") + ":"))
         self.addr_e = ButtonsLineEdit(self.address)
         self.addr_e.addCopyButton(self.app)
         icon = "qrcode_white.png" if ColorScheme.dark_scheme else "qrcode.png"
@@ -84,15 +84,27 @@ class AddressDialog(WindowModalDialog):
                 pubkey_e.setReadOnly(True)
                 vbox.addWidget(pubkey_e)
 
-        try:
-            redeem_script = self.wallet.pubkeys_to_redeem_script(pubkeys)
-        except BaseException as e:
-            redeem_script = None
+        redeem_script = self.wallet.get_redeem_script(address)
         if redeem_script:
             vbox.addWidget(QLabel(_("Redeem Script") + ':'))
-            redeem_e = ShowQRTextEdit(text=redeem_script)
+            redeem_e = ShowQRTextEdit(text=redeem_script, config=self.config)
             redeem_e.addCopyButton(self.app)
             vbox.addWidget(redeem_e)
+
+        witness_script = self.wallet.get_witness_script(address)
+        if witness_script:
+            vbox.addWidget(QLabel(_("Witness Script") + ':'))
+            witness_e = ShowQRTextEdit(text=witness_script, config=self.config)
+            witness_e.addCopyButton(self.app)
+            vbox.addWidget(witness_e)
+
+        address_path_str = self.wallet.get_address_path_str(address)
+        if address_path_str:
+            vbox.addWidget(QLabel(_("Derivation path") + ':'))
+            der_path_e = ButtonsLineEdit(address_path_str)
+            der_path_e.addCopyButton(self.app)
+            der_path_e.setReadOnly(True)
+            vbox.addWidget(der_path_e)
 
         vbox.addWidget(QLabel(_("History")))
         addr_hist_model = AddressHistoryModel(self.parent, self.address)

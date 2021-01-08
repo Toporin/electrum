@@ -1,4 +1,7 @@
+from typing import TYPE_CHECKING
+
 from kivy.app import App
+from kivy.clock import Clock
 from kivy.factory import Factory
 from kivy.properties import ObjectProperty
 from kivy.lang import Builder
@@ -6,6 +9,11 @@ from decimal import Decimal
 from kivy.uix.popup import Popup
 
 from electrum_ltc.gui.kivy.i18n import _
+from ...util import address_colors
+
+if TYPE_CHECKING:
+    from ...main_window import ElectrumWindow
+
 
 Builder.load_string('''
 <AddressLabel@Label>
@@ -34,6 +42,26 @@ Builder.load_string('''
             shorten: True
         Widget
 
+<AddressButton@Button>:
+    background_color: 1, .585, .878, 0
+    halign: 'center'
+    text_size: (self.width, None)
+    shorten: True
+    size_hint: 0.5, None
+    default_text: ''
+    text: self.default_text
+    padding: '5dp', '5dp'
+    height: '40dp'
+    text_color: self.foreground_color
+    disabled_color: 1, 1, 1, 1
+    foreground_color: 1, 1, 1, 1
+    canvas.before:
+        Color:
+            rgba: (0.9, .498, 0.745, 1) if self.state == 'down' else self.background_color
+        Rectangle:
+            size: self.size
+            pos: self.pos
+
 <AddressesDialog@Popup>
     id: popup
     title: _('Addresses')
@@ -45,12 +73,12 @@ Builder.load_string('''
         self.update()
     BoxLayout:
         id:box
-        padding: '12dp', '70dp', '12dp', '12dp'
+        padding: '12dp', '12dp', '12dp', '12dp'
         spacing: '12dp'
         orientation: 'vertical'
-        size_hint: 1, 1.1
         BoxLayout:
             spacing: '6dp'
+            height: self.minimum_height
             size_hint: 1, None
             orientation: 'horizontal'
             AddressFilter:
@@ -105,6 +133,8 @@ Builder.load_string('''
     status: ''
     script_type: ''
     pk: ''
+    address_color: 1, 1, 1, 1
+    address_background_color: 0.3, 0.3, 0.3, 1
     BoxLayout:
         orientation: 'vertical'
         ScrollView:
@@ -117,6 +147,8 @@ Builder.load_string('''
                 TopLabel:
                     text: _('Address')
                 RefLabel:
+                    color: root.address_color
+                    background_color: root.address_background_color
                     data: root.address
                     name: _('Address')
                 GridLayout:
@@ -169,12 +201,14 @@ class AddressPopup(Popup):
         self.status = status
         self.script_type = self.app.wallet.get_txin_type(self.address)
         self.balance = self.app.format_amount_and_units(balance)
+        self.address_color, self.address_background_color = address_colors(self.app.wallet, address)
 
     def receive_at(self):
         self.dismiss()
         self.parent_dialog.dismiss()
         self.app.switch_to('receive')
-        self.app.receive_screen.set_address(self.address)
+        # retry until receive_screen is set
+        Clock.schedule_interval(lambda dt: bool(self.app.receive_screen.set_address(self.address) and False) if self.app.receive_screen else True, 0.1)
 
     def do_export(self, pk_label):
         self.app.export_private_keys(pk_label, self.address)
@@ -184,7 +218,7 @@ class AddressesDialog(Factory.Popup):
 
     def __init__(self, app):
         Factory.Popup.__init__(self)
-        self.app = app
+        self.app = app  # type: ElectrumWindow
 
     def get_card(self, addr, balance, is_used, label):
         ci = {}
@@ -208,7 +242,7 @@ class AddressesDialog(Factory.Popup):
         n = 0
         cards = []
         for address in _list:
-            label = wallet.labels.get(address, '')
+            label = wallet.get_label(address)
             balance = sum(wallet.get_addr_balance(address))
             is_used_and_empty = wallet.is_used(address) and balance == 0
             if self.show_used == 1 and (balance or is_used_and_empty):

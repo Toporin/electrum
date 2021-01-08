@@ -25,26 +25,33 @@
 
 import time
 from xmlrpc.client import ServerProxy
+from typing import TYPE_CHECKING, Union, List, Tuple
+import ssl
 
 from PyQt5.QtCore import QObject, pyqtSignal
 from PyQt5.QtWidgets import QPushButton
+import certifi
 
 from electrum_ltc import util, keystore, ecc, crypto
 from electrum_ltc import transaction
+from electrum_ltc.transaction import Transaction, PartialTransaction, tx_from_any
 from electrum_ltc.bip32 import BIP32Node
 from electrum_ltc.plugin import BasePlugin, hook
 from electrum_ltc.i18n import _
-from electrum_ltc.wallet import Multisig_Wallet
+from electrum_ltc.wallet import Multisig_Wallet, Abstract_Wallet
 from electrum_ltc.util import bh2u, bfh
 
-from electrum_ltc.gui.qt.transaction_dialog import show_transaction
+from electrum_ltc.gui.qt.transaction_dialog import show_transaction, TxDialog
 from electrum_ltc.gui.qt.util import WaitingDialog
 
-import sys
-import traceback
+if TYPE_CHECKING:
+    from electrum_ltc.gui.qt import ElectrumGui
+    from electrum_ltc.gui.qt.main_window import ElectrumWindow
 
 
-server = ServerProxy('https://cosigner.electrum.org/', allow_none=True)
+ca_path = certifi.where()
+ssl_context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile=ca_path)
+server = ServerProxy('https://cosigner.electrum.org/', allow_none=True, context=ssl_context)
 
 
 class Listener(util.DaemonThread):
@@ -97,16 +104,20 @@ class Plugin(BasePlugin):
         self.listener = None
         self.obj = QReceiveSignalObject()
         self.obj.cosigner_receive_signal.connect(self.on_receive)
-        self.keys = []
-        self.cosigner_list = []
+        self.keys = []  # type: List[Tuple[str, str, ElectrumWindow]]
+        self.cosigner_list = []  # type: List[Tuple[ElectrumWindow, str, bytes, str]]
+        self._init_qt_received = False
 
     @hook
-    def init_qt(self, gui):
+    def init_qt(self, gui: 'ElectrumGui'):
+        if self._init_qt_received:  # only need/want the first signal
+            return
+        self._init_qt_received = True
         for window in gui.windows:
-            self.on_new_window(window)
+            self.load_wallet(window.wallet, window)
 
     @hook
-    def on_new_window(self, window):
+    def load_wallet(self, wallet: 'Abstract_Wallet', window: 'ElectrumWindow'):
         self.update(window)
 
     @hook
@@ -116,10 +127,11 @@ class Plugin(BasePlugin):
     def is_available(self):
         return True
 
-    def update(self, window):
+    def update(self, window: 'ElectrumWindow'):
         wallet = window.wallet
         if type(wallet) != Multisig_Wallet:
             return
+        assert isinstance(wallet, Multisig_Wallet)  # only here for type-hints in IDE
         if self.listener is None:
             self.logger.info("starting listener")
             self.listener = Listener(self)
@@ -131,7 +143,7 @@ class Plugin(BasePlugin):
         self.keys = []
         self.cosigner_list = []
         for key, keystore in wallet.keystores.items():
-            xpub = keystore.get_master_public_key()
+            xpub = keystore.get_master_public_key()  # type: str
             pubkey = BIP32Node.from_xkey(xpub).eckey.get_public_key_bytes(compressed=True)
             _hash = bh2u(crypto.sha256d(pubkey))
             if not keystore.is_watching_only():
@@ -142,35 +154,31 @@ class Plugin(BasePlugin):
             self.listener.set_keyhashes([t[1] for t in self.keys])
 
     @hook
-    def transaction_dialog(self, d):
+    def transaction_dialog(self, d: 'TxDialog'):
         d.cosigner_send_button = b = QPushButton(_("Send to cosigner"))
         b.clicked.connect(lambda: self.do_send(d.tx))
         d.buttons.insert(0, b)
-        self.transaction_dialog_update(d)
+        b.setVisible(False)
 
     @hook
-    def transaction_dialog_update(self, d):
-        if d.tx.is_complete() or d.wallet.can_sign(d.tx):
-            d.cosigner_send_button.hide()
+    def transaction_dialog_update(self, d: 'TxDialog'):
+        if not d.finalized or d.tx.is_complete() or d.wallet.can_sign(d.tx):
+            d.cosigner_send_button.setVisible(False)
             return
         for window, xpub, K, _hash in self.cosigner_list:
             if window.wallet == d.wallet and self.cosigner_can_sign(d.tx, xpub):
-                d.cosigner_send_button.show()
+                d.cosigner_send_button.setVisible(True)
                 break
         else:
-            d.cosigner_send_button.hide()
+            d.cosigner_send_button.setVisible(False)
 
-    def cosigner_can_sign(self, tx, cosigner_xpub):
-        from electrum_ltc.keystore import is_xpubkey, parse_xpubkey
-        xpub_set = set([])
-        for txin in tx.inputs():
-            for x_pubkey in txin['x_pubkeys']:
-                if is_xpubkey(x_pubkey):
-                    xpub, s = parse_xpubkey(x_pubkey)
-                    xpub_set.add(xpub)
-        return cosigner_xpub in xpub_set
+    def cosigner_can_sign(self, tx: Transaction, cosigner_xpub: str) -> bool:
+        # TODO implement this properly:
+        #      should return True iff cosigner (with given xpub) can sign and has not yet signed.
+        #      note that tx could also be unrelated from wallet?... (not ismine inputs)
+        return True
 
-    def do_send(self, tx):
+    def do_send(self, tx: Union[Transaction, PartialTransaction]):
         def on_success(result):
             window.show_message(_("Your transaction was sent to the cosigning pool.") + '\n' +
                                 _("Open your cosigner wallet to retrieve it."))
@@ -180,17 +188,27 @@ class Plugin(BasePlugin):
             except OSError: pass
             window.show_error(_("Failed to send transaction to cosigning pool") + ':\n' + repr(e))
 
+        buffer = []
+        some_window = None
+        # construct messages
         for window, xpub, K, _hash in self.cosigner_list:
             if not self.cosigner_can_sign(tx, xpub):
                 continue
-            # construct message
-            raw_tx_bytes = bfh(str(tx))
+            some_window = window
+            raw_tx_bytes = tx.serialize_as_bytes()
             public_key = ecc.ECPubkey(K)
             message = public_key.encrypt_message(raw_tx_bytes).decode('ascii')
-            # send message
-            task = lambda: server.put(_hash, message)
-            msg = _('Sending transaction to cosigning pool...')
-            WaitingDialog(window, msg, task, on_success, on_failure)
+            buffer.append((_hash, message))
+        if not buffer:
+            return
+
+        # send messages
+        # note: we send all messages sequentially on the same thread
+        def send_messages_task():
+            for _hash, message in buffer:
+                server.put(_hash, message)
+        msg = _('Sending transaction to cosigning pool...')
+        WaitingDialog(some_window, msg, send_messages_task, on_success, on_failure)
 
     def on_receive(self, keyhash, message):
         self.logger.info(f"signal arrived for {keyhash}")
@@ -223,12 +241,12 @@ class Plugin(BasePlugin):
             return
         try:
             privkey = BIP32Node.from_xkey(xprv).eckey
-            message = bh2u(privkey.decrypt_message(message))
+            message = privkey.decrypt_message(message)
         except Exception as e:
             self.logger.exception('')
             window.show_error(_('Error decrypting message') + ':\n' + repr(e))
             return
 
         self.listener.clear(keyhash)
-        tx = transaction.Transaction(message)
-        show_transaction(tx, window, prompt_if_unsaved=True)
+        tx = tx_from_any(message)
+        show_transaction(tx, parent=window, prompt_if_unsaved=True)

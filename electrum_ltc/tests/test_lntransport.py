@@ -5,10 +5,12 @@ from electrum_ltc.lnutil import LNPeerAddr
 from electrum_ltc.lntransport import LNResponderTransport, LNTransport
 
 from . import ElectrumTestCase
+from .test_bitcoin import needs_test_with_all_chacha20_implementations
 
 
 class TestLNTransport(ElectrumTestCase):
 
+    @needs_test_with_all_chacha20_implementations
     def test_responder(self):
         # local static
         ls_priv=bytes.fromhex('2121212121212121212121212121212121212121212121212121212121212121')
@@ -37,8 +39,9 @@ class TestLNTransport(ElectrumTestCase):
         transport = LNResponderTransport(ls_priv, Reader(), Writer())
         asyncio.get_event_loop().run_until_complete(transport.handshake(epriv=e_priv))
 
+    @needs_test_with_all_chacha20_implementations
     def test_loop(self):
-        l = asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
         responder_shaked = asyncio.Event()
         server_shaked = asyncio.Event()
         responder_key = ECPrivkey.generate_random_key()
@@ -50,15 +53,20 @@ class TestLNTransport(ElectrumTestCase):
             self.assertEqual(await t.read_messages().__anext__(), b'hello from client')
             responder_shaked.set()
         server_future = asyncio.ensure_future(asyncio.start_server(cb, '127.0.0.1', 42898))
-        l.run_until_complete(server_future)
+        loop.run_until_complete(server_future)
+        server = server_future.result()  # type: asyncio.Server
         async def connect():
             peer_addr = LNPeerAddr('127.0.0.1', 42898, responder_key.get_public_key_bytes())
-            t = LNTransport(initiator_key.get_secret_bytes(), peer_addr)
+            t = LNTransport(initiator_key.get_secret_bytes(), peer_addr, proxy=None)
             await t.handshake()
             t.send_bytes(b'hello from client')
             self.assertEqual(await t.read_messages().__anext__(), b'hello from server')
             server_shaked.set()
 
-        asyncio.ensure_future(connect())
-        l.run_until_complete(responder_shaked.wait())
-        l.run_until_complete(server_shaked.wait())
+        try:
+            connect_future = asyncio.ensure_future(connect())
+            loop.run_until_complete(responder_shaked.wait())
+            loop.run_until_complete(server_shaked.wait())
+        finally:
+            server.close()
+            loop.run_until_complete(server.wait_closed())

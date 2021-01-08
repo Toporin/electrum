@@ -36,7 +36,7 @@ Builder.load_string('''
             text: 'Show report contents'
             height: '48dp'
             size_hint: 1, None
-            on_press: root.show_contents()
+            on_release: root.show_contents()
         BoxLayout:
             size_hint: 1, 0.1
         Label:
@@ -130,6 +130,9 @@ class CrashReporter(BaseCrashReporter, Factory.Popup):
             if response["location"]:
                 self.open_url(response["location"])
         self.dismiss()
+
+    def on_dismiss(self):
+        self.main_window.on_wizard_aborted()
 
     def open_url(self, url):
         if platform != 'android':

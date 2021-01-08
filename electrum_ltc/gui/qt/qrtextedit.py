@@ -4,14 +4,15 @@ from electrum_ltc.i18n import _
 from electrum_ltc.plugin import run_hook
 from electrum_ltc.simple_config import SimpleConfig
 
-from .util import ButtonsTextEdit, MessageBoxMixin, ColorScheme, get_parent_main_window
+from .util import ButtonsTextEdit, MessageBoxMixin, ColorScheme, getOpenFileName
 
 
 class ShowQRTextEdit(ButtonsTextEdit):
 
-    def __init__(self, text=None):
+    def __init__(self, text=None, *, config: SimpleConfig):
         ButtonsTextEdit.__init__(self, text)
-        self.setReadOnly(1)
+        self.config = config
+        self.setReadOnly(True)
         icon = "qrcode_white.png" if ColorScheme.dark_scheme else "qrcode.png"
         self.addButton(icon, self.qr_show, _("Show as QR code"))
 
@@ -23,7 +24,11 @@ class ShowQRTextEdit(ButtonsTextEdit):
             s = str(self.toPlainText())
         except:
             s = self.toPlainText()
-        QRDialog(s, parent=self).exec_()
+        QRDialog(
+            data=s,
+            parent=self,
+            config=self.config,
+        ).exec_()
 
     def contextMenuEvent(self, e):
         m = self.createStandardContextMenu()
@@ -33,22 +38,32 @@ class ShowQRTextEdit(ButtonsTextEdit):
 
 class ScanQRTextEdit(ButtonsTextEdit, MessageBoxMixin):
 
-    def __init__(self, text="", allow_multi=False):
+    def __init__(self, text="", allow_multi=False, *, config: SimpleConfig):
         ButtonsTextEdit.__init__(self, text)
         self.allow_multi = allow_multi
-        self.setReadOnly(0)
+        self.config = config
+        self.setReadOnly(False)
         self.addButton("file.png", self.file_input, _("Read file"))
         icon = "camera_white.png" if ColorScheme.dark_scheme else "camera_dark.png"
         self.addButton(icon, self.qr_input, _("Read QR code"))
         run_hook('scan_text_edit', self)
 
     def file_input(self):
-        fileName, __ = QFileDialog.getOpenFileName(self, 'select file')
+        fileName = getOpenFileName(
+            parent=self,
+            title='select file',
+            config=self.config,
+        )
         if not fileName:
             return
         try:
-            with open(fileName, "r") as f:
-                data = f.read()
+            try:
+                with open(fileName, "r") as f:
+                    data = f.read()
+            except UnicodeError as e:
+                with open(fileName, "rb") as f:
+                    data = f.read()
+                data = data.hex()
         except BaseException as e:
             self.show_error(_('Error opening file') + ':\n' + repr(e))
         else:
@@ -56,11 +71,8 @@ class ScanQRTextEdit(ButtonsTextEdit, MessageBoxMixin):
 
     def qr_input(self):
         from electrum_ltc import qrscanner
-        main_window = get_parent_main_window(self)
-        assert main_window
-        config = main_window.config
         try:
-            data = qrscanner.scan_barcode(config.get_video_device())
+            data = qrscanner.scan_barcode(self.config.get_video_device())
         except BaseException as e:
             self.show_error(repr(e))
             data = ''

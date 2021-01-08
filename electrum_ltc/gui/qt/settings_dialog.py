@@ -22,50 +22,33 @@
 # ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-import sys
-import time
-import threading
-import os
-import traceback
-import json
-from decimal import Decimal
 
-from PyQt5.QtGui import QPixmap, QKeySequence, QIcon, QCursor
-from PyQt5.QtCore import Qt, QRect, QStringListModel, QSize, pyqtSignal
-from PyQt5.QtWidgets import (QMessageBox, QComboBox, QSystemTrayIcon, QTabWidget,
-                             QSpinBox, QMenuBar, QFileDialog, QCheckBox, QLabel,
-                             QVBoxLayout, QGridLayout, QLineEdit, QTreeWidgetItem,
-                             QHBoxLayout, QPushButton, QScrollArea, QTextEdit,
-                             QShortcut, QMainWindow, QCompleter, QInputDialog,
-                             QWidget, QMenu, QSizePolicy, QStatusBar)
+from typing import Optional, TYPE_CHECKING
 
-import electrum_ltc as electrum
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import (QComboBox,  QTabWidget,
+                             QSpinBox,  QFileDialog, QCheckBox, QLabel,
+                             QVBoxLayout, QGridLayout, QLineEdit,
+                             QPushButton, QWidget)
+
 from electrum_ltc.i18n import _
 from electrum_ltc import util, coinchooser, paymentrequest
-from electrum_ltc.util import (format_time, format_satoshis, format_fee_satoshis,
-                               format_satoshis_plain, NotEnoughFunds,
-                               UserCancelled, NoDynamicFeeEstimates, profiler,
-                               export_meta, import_meta, bh2u, bfh, InvalidPassword,
-                               base_units, base_units_list, base_unit_name_to_decimal_point,
-                               decimal_point_to_base_unit_name, quantize_feerate,
-                               UnknownBaseUnit, DECIMAL_POINT_DEFAULT, UserFacingException,
-                               get_new_wallet_name, send_exception_to_crash_reporter,
-                               InvalidBitcoinURI, InvoiceError)
+from electrum_ltc.util import base_units_list
 
-from .amountedit import AmountEdit, BTCAmountEdit, MyLineEdit, FeerateEdit
-from .util import (read_QIcon, ColorScheme, text_dialog, icon_path, WaitingDialog,
-                       WindowModalDialog, ChoicesLayout, HelpLabel, FromList, Buttons,
-                       OkButton, InfoButton, WWLabel, TaskThread, CancelButton,
-                       CloseButton, HelpButton, MessageBoxMixin, EnterButton,
-                       ButtonsLineEdit, CopyCloseButton, import_meta_gui, export_meta_gui,
-                       filename_field, address_field, char_width_in_lineedit, webopen)
+from .util import (ColorScheme, WindowModalDialog, HelpLabel, Buttons,
+                   CloseButton)
 
 from electrum_ltc.i18n import languages
 from electrum_ltc import qrscanner
 
+if TYPE_CHECKING:
+    from electrum_ltc.simple_config import SimpleConfig
+    from .main_window import ElectrumWindow
+
+
 class SettingsDialog(WindowModalDialog):
 
-    def __init__(self, parent, config):
+    def __init__(self, parent: 'ElectrumWindow', config: 'SimpleConfig'):
         WindowModalDialog.__init__(self, parent, _('Preferences'))
         self.config = config
         self.window = parent
@@ -76,10 +59,8 @@ class SettingsDialog(WindowModalDialog):
         vbox = QVBoxLayout()
         tabs = QTabWidget()
         gui_widgets = []
-        fee_widgets = []
         tx_widgets = []
         oa_widgets = []
-        services_widgets = []
 
         # language
         lang_help = _('Select which language is used in the GUI (after restart).')
@@ -107,44 +88,19 @@ class SettingsDialog(WindowModalDialog):
         nz_label = HelpLabel(_('Zeros after decimal point') + ':', nz_help)
         nz = QSpinBox()
         nz.setMinimum(0)
-        nz.setMaximum(self.window.decimal_point)
-        nz.setValue(self.window.num_zeros)
+        nz.setMaximum(self.config.decimal_point)
+        nz.setValue(self.config.num_zeros)
         if not self.config.is_modifiable('num_zeros'):
             for w in [nz, nz_label]: w.setEnabled(False)
         def on_nz():
             value = nz.value()
-            if self.window.num_zeros != value:
-                self.window.num_zeros = value
+            if self.config.num_zeros != value:
+                self.config.num_zeros = value
                 self.config.set_key('num_zeros', value, True)
                 self.window.history_list.update()
                 self.window.address_list.update()
         nz.valueChanged.connect(on_nz)
         gui_widgets.append((nz_label, nz))
-
-        msg = '\n'.join([
-            _('Time based: fee rate is based on average confirmation time estimates'),
-            _('Mempool based: fee rate is targeting a depth in the memory pool')
-            ]
-        )
-        fee_type_label = HelpLabel(_('Fee estimation') + ':', msg)
-        fee_type_combo = QComboBox()
-        fee_type_combo.addItems([_('Static'), _('ETA'), _('Mempool')])
-        fee_type_combo.setCurrentIndex((2 if self.config.use_mempool_fees() else 1) if self.config.is_dynfee() else 0)
-        def on_fee_type(x):
-            self.config.set_key('mempool_fees', x==2)
-            self.config.set_key('dynamic_fees', x>0)
-            self.window.fee_slider.update()
-        fee_type_combo.currentIndexChanged.connect(on_fee_type)
-        fee_widgets.append((fee_type_label, fee_type_combo))
-
-        feebox_cb = QCheckBox(_('Edit fees manually'))
-        feebox_cb.setChecked(bool(self.config.get('show_fee', False)))
-        feebox_cb.setToolTip(_("Show fee edit box in send tab."))
-        def on_feebox(x):
-            self.config.set_key('show_fee', x == Qt.Checked)
-            self.window.fee_adv_controls.setVisible(bool(x))
-        feebox_cb.stateChanged.connect(on_feebox)
-        fee_widgets.append((feebox_cb, None))
 
         use_rbf = bool(self.config.get('use_rbf', True))
         use_rbf_cb = QCheckBox(_('Use Replace-By-Fee'))
@@ -157,7 +113,7 @@ class SettingsDialog(WindowModalDialog):
             self.config.set_key('use_rbf', bool(x))
             batch_rbf_cb.setEnabled(bool(x))
         use_rbf_cb.stateChanged.connect(on_use_rbf)
-        fee_widgets.append((use_rbf_cb, None))
+        tx_widgets.append((use_rbf_cb, None))
 
         batch_rbf_cb = QCheckBox(_('Batch RBF transactions'))
         batch_rbf_cb.setChecked(bool(self.config.get('batch_rbf', False)))
@@ -168,26 +124,26 @@ class SettingsDialog(WindowModalDialog):
         def on_batch_rbf(x):
             self.config.set_key('batch_rbf', bool(x))
         batch_rbf_cb.stateChanged.connect(on_batch_rbf)
-        fee_widgets.append((batch_rbf_cb, None))
+        tx_widgets.append((batch_rbf_cb, None))
 
         # lightning
-        help_lightning = _("""Enable Lightning Network payments. Note that funds stored in
-lightning channels are not recoverable from your seed. You must backup
-your wallet file after every channel creation.""")
         lightning_widgets = []
-        lightning_cb = QCheckBox(_("Enable Lightning"))
-        lightning_cb.setToolTip(help_lightning)
-        lightning_cb.setChecked(bool(self.config.get('lightning', False)))
-        def on_lightning_checked(x):
-            self.config.set_key('lightning', bool(x))
-        lightning_cb.stateChanged.connect(on_lightning_checked)
-        lightning_widgets.append((lightning_cb, None))
 
-        help_persist = _("""If this option is checked, Electrum will persist as a daemon after
-you close all your wallet windows. Your local watchtower will keep
-running, and it will protect your channels even if your wallet is not
+        help_local_wt = _("""If this option is checked, Electrum will
+run a local watchtower and protect your channels even if your wallet is not
 open. For this to work, your computer needs to be online regularly.""")
-        persist_cb = QCheckBox(_("Run as daemon after the GUI is closed"))
+        local_wt_cb = QCheckBox(_("Run a local watchtower"))
+        local_wt_cb.setToolTip(help_local_wt)
+        local_wt_cb.setChecked(bool(self.config.get('run_local_watchtower', False)))
+        def on_local_wt_checked(x):
+            self.config.set_key('run_local_watchtower', bool(x))
+        local_wt_cb.stateChanged.connect(on_local_wt_checked)
+        lightning_widgets.append((local_wt_cb, None))
+
+        help_persist = _("""If this option is checked, Electrum will persist after
+you close all your wallet windows, and the Electrum icon will be visible in the taskbar.
+Use this if you want your local watchtower to keep running after you close your wallet.""")
+        persist_cb = QCheckBox(_("Persist after all windows are closed"))
         persist_cb.setToolTip(help_persist)
         persist_cb.setChecked(bool(self.config.get('persist_daemon', False)))
         def on_persist_checked(x):
@@ -209,8 +165,6 @@ open. For this to work, your computer needs to be online regularly.""")
         def on_wt_url():
             url = self.watchtower_url_e.text() or None
             watchtower_url = self.config.set_key('watchtower_url', url)
-            if url:
-                self.lnwatcher.set_remote_watchtower()
         self.watchtower_url_e.editingFinished.connect(on_wt_url)
         lightning_widgets.append((remote_wt_cb, self.watchtower_url_e))
 
@@ -225,60 +179,6 @@ open. For this to work, your computer needs to be online regularly.""")
         self.alias_e.editingFinished.connect(self.on_alias_edit)
         oa_widgets.append((alias_label, self.alias_e))
 
-        # Services
-        ssl_cert = self.config.get('ssl_certfile')
-        ssl_cert_label = HelpLabel(_('SSL cert file') + ':', 'certificate file, with intermediate certificates if needed')
-        self.ssl_cert_e = QPushButton(ssl_cert)
-        self.ssl_cert_e.clicked.connect(self.select_ssl_certfile)
-        services_widgets.append((ssl_cert_label, self.ssl_cert_e))
-
-        ssl_privkey = self.config.get('ssl_keyfile')
-        ssl_privkey_label = HelpLabel(_('SSL key file') + ':', '')
-        self.ssl_privkey_e = QPushButton(ssl_privkey)
-        self.ssl_cert_e.clicked.connect(self.select_ssl_certfile)
-        services_widgets.append((ssl_privkey_label, self.ssl_privkey_e))
-
-        ssl_domain_label = HelpLabel(_('SSL domain') + ':', '')
-        self.ssl_domain_e = QLineEdit('')
-        self.ssl_domain_e.setReadOnly(True)
-        services_widgets.append((ssl_domain_label, self.ssl_domain_e))
-
-        self.check_ssl_config()
-
-        hostname = self.config.get('services_hostname', 'localhost')
-        hostname_label = HelpLabel(_('Hostname') + ':', 'must match your SSL domain')
-        self.hostname_e = QLineEdit(hostname)
-        self.hostname_e.editingFinished.connect(self.on_hostname)
-        services_widgets.append((hostname_label, self.hostname_e))
-
-        payserver_cb = QCheckBox(_("Run PayServer"))
-        payserver_cb.setToolTip("Configure a port")
-        payserver_cb.setChecked(bool(self.config.get('run_payserver', False)))
-        def on_payserver_checked(x):
-            self.config.set_key('run_payserver', bool(x))
-            self.payserver_port_e.setEnabled(bool(x))
-        payserver_cb.stateChanged.connect(on_payserver_checked)
-        payserver_port = self.config.get('payserver_port', 8002)
-        self.payserver_port_e = QLineEdit(str(payserver_port))
-        self.payserver_port_e.editingFinished.connect(self.on_payserver_port)
-        self.payserver_port_e.setEnabled(self.config.get('run_payserver', False))
-        services_widgets.append((payserver_cb, self.payserver_port_e))
-
-        help_local_wt = _("""To setup a local watchtower, you must run Electrum on a machine
-        that is always connected to the internet. Configure a port if you want it to be public.""")
-        local_wt_cb = QCheckBox(_("Run Watchtower"))
-        local_wt_cb.setToolTip(help_local_wt)
-        local_wt_cb.setChecked(bool(self.config.get('run_watchtower', False)))
-        def on_local_wt_checked(x):
-            self.config.set_key('run_watchtower', bool(x))
-            self.local_wt_port_e.setEnabled(bool(x))
-        local_wt_cb.stateChanged.connect(on_local_wt_checked)
-        watchtower_port = self.config.get('watchtower_port', '')
-        self.local_wt_port_e = QLineEdit(str(watchtower_port))
-        self.local_wt_port_e.setEnabled(self.config.get('run_watchtower', False))
-        self.local_wt_port_e.editingFinished.connect(self.on_watchtower_port)
-        services_widgets.append((local_wt_cb, self.local_wt_port_e))
-
         # units
         units = base_units_list
         msg = (_('Base unit of your wallet.')
@@ -292,11 +192,10 @@ open. For this to work, your computer needs to be online regularly.""")
             unit_result = units[unit_combo.currentIndex()]
             if self.window.base_unit() == unit_result:
                 return
-            edits = self.window.amount_e, self.window.fee_e, self.window.receive_amount_e
+            edits = self.window.amount_e, self.window.receive_amount_e
             amounts = [edit.get_amount() for edit in edits]
-            self.window.decimal_point = base_unit_name_to_decimal_point(unit_result)
-            self.config.set_key('decimal_point', self.window.decimal_point, True)
-            nz.setMaximum(self.window.decimal_point)
+            self.config.set_base_unit(unit_result)
+            nz.setMaximum(self.config.decimal_point)
             self.window.history_list.update()
             self.window.request_list.update()
             self.window.address_list.update()
@@ -349,6 +248,14 @@ open. For this to work, your computer needs to be online regularly.""")
         filelogging_cb.setToolTip(_('Debug logs can be persisted to disk. These are useful for troubleshooting.'))
         gui_widgets.append((filelogging_cb, None))
 
+        preview_cb = QCheckBox(_('Advanced preview'))
+        preview_cb.setChecked(bool(self.config.get('advanced_preview', False)))
+        preview_cb.setToolTip(_("Open advanced transaction preview dialog when 'Pay' is clicked."))
+        def on_preview(x):
+            self.config.set_key('advanced_preview', x == Qt.Checked)
+        preview_cb.stateChanged.connect(on_preview)
+        tx_widgets.append((preview_cb, None))
+
         usechange_cb = QCheckBox(_('Use change addresses'))
         usechange_cb.setChecked(self.window.wallet.use_change)
         if not self.config.is_modifiable('use_change'): usechange_cb.setEnabled(False)
@@ -356,7 +263,7 @@ open. For this to work, your computer needs to be online regularly.""")
             usechange_result = x == Qt.Checked
             if self.window.wallet.use_change != usechange_result:
                 self.window.wallet.use_change = usechange_result
-                self.window.wallet.storage.put('use_change', self.window.wallet.use_change)
+                self.window.wallet.db.put('use_change', self.window.wallet.use_change)
                 multiple_cb.setEnabled(self.window.wallet.use_change)
         usechange_cb.stateChanged.connect(on_usechange)
         usechange_cb.setToolTip(_('Using change addresses makes it more difficult for other people to track your transactions.'))
@@ -366,7 +273,7 @@ open. For this to work, your computer needs to be online regularly.""")
             multiple = x == Qt.Checked
             if self.wallet.multiple_change != multiple:
                 self.wallet.multiple_change = multiple
-                self.wallet.storage.put('multiple_change', multiple)
+                self.wallet.db.put('multiple_change', multiple)
         multiple_change = self.wallet.multiple_change
         multiple_cb = QCheckBox(_('Use multiple change addresses'))
         multiple_cb.setEnabled(self.wallet.use_change)
@@ -410,7 +317,7 @@ open. For this to work, your computer needs to be online regularly.""")
 
         def on_outrounding(x):
             self.config.set_key('coin_chooser_output_rounding', bool(x))
-        enable_outrounding = bool(self.config.get('coin_chooser_output_rounding', False))
+        enable_outrounding = bool(self.config.get('coin_chooser_output_rounding', True))
         outrounding_cb = QCheckBox(_('Enable output value rounding'))
         outrounding_cb.setToolTip(
             _('Set the value of the change output so that it has similar precision to the other outputs.') + '\n' +
@@ -533,11 +440,9 @@ open. For this to work, your computer needs to be online regularly.""")
 
         tabs_info = [
             (gui_widgets, _('General')),
-            (fee_widgets, _('Fees')),
             (tx_widgets, _('Transactions')),
             (lightning_widgets, _('Lightning')),
             (fiat_widgets, _('Fiat')),
-            (services_widgets, _('Services')),
             (oa_widgets, _('OpenAlias')),
         ]
         for widgets, name in tabs_info:
@@ -577,48 +482,3 @@ open. For this to work, your computer needs to be online regularly.""")
         self.config.set_key('alias', alias, True)
         if alias:
             self.window.fetch_alias()
-
-    def select_ssl_certfile(self, b):
-        name = self.config.get('ssl_certfile', '')
-        filename, __ = QFileDialog.getOpenFileName(self, "Select your SSL certificate file", name)
-        if filename:
-            self.config.set_key('ssl_certfile', filename)
-            self.ssl_cert_e.setText(filename)
-            self.check_ssl_config()
-
-    def select_ssl_privkey(self, b):
-        name = self.config.get('ssl_privkey', '')
-        filename, __ = QFileDialog.getOpenFileName(self, "Select your SSL private key file", name)
-        if filename:
-            self.config.set_key('ssl_privkey', filename)
-            self.ssl_cert_e.setText(filename)
-            self.check_ssl_config()
-
-    def check_ssl_config(self):
-        if self.config.get('ssl_keyfile') and self.config.get('ssl_certfile'):
-            try:
-                SSL_identity = paymentrequest.check_ssl_config(self.config)
-                SSL_error = None
-            except BaseException as e:
-                SSL_identity = "error"
-                SSL_error = repr(e)
-        else:
-            SSL_identity = ""
-            SSL_error = None
-        self.ssl_domain_e.setText(SSL_identity)
-        s = (ColorScheme.RED if SSL_error else ColorScheme.GREEN).as_stylesheet(True) if SSL_identity else ''
-        self.ssl_domain_e.setStyleSheet(s)
-        if SSL_error:
-            self.ssl_domain_e.setText(SSL_error)
-
-    def on_hostname(self):
-        hostname = str(self.hostname_e.text())
-        self.config.set_key('services_hostname', hostname, True)
-
-    def on_payserver_port(self):
-        port = int(self.payserver_port_e.text())
-        self.config.set_key('payserver_port', port, True)
-
-    def on_watchtower_port(self):
-        port = int(self.payserver_port_e.text())
-        self.config.set_key('watchtower_port', port, True)
