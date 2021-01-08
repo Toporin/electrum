@@ -14,7 +14,7 @@ Introduction
 This plugin allows to integrate the Satochip Hardware Wallet with Electrum. To use it, you need a device with the Satochip javacard applet installed (see https://github.com/Toporin/SatochipApplet).
 If the wallet is not intialized yet, Electrum will perform the setup (you only need to do this once). During setup, a seed is created: this seed allows you to recover your wallet at anytime, so make sure to BACKUP THE SEED SECURELY! During setup, a PIN code is also created: this PIN allows to unlock th device to access your funds. If you try too many wrong PIN, your device will be locked indefinitely (it is 'bricked'). If you loose your PIN or brick your device, you can only recover your funds with the seed backup.
 
-The Satochip wallet is currently in Beta, use with caution! In this phase, it is strongly recommended to use the software on the Bitcoin testnet first.
+The Satochip wallet is currently in Beta, use with caution!You can use the software on the Bitcoin testnet using the --testnet option.
 This software is provided 'as-is', without any express or implied warranty. In no event will the authors be held liable for any damages arising from the use of this software.
 
 Rem: Electrum uses Python 3.x. In case of error, check first that you are not trying to run Electrum with Python 2.x or with Python 2.x libraries.
@@ -82,16 +82,3 @@ Pyscard is required to connect to the smartcard::
  
 To run Electrum use::
  python3 electrum -v --testnet 
- 
- 
-Test suite
-=============
- 
-To run the test suite, run::
-
-    python -m unittest electrum.plugins.satochip.test_CardConnector
- 
-The test suite uses the following default PIN code: "12345678".
-If you run the test suite after (or before) electrum, you may block the card if the PIN used are not the same!
-If the card is locked, you will have to reinstall the javacard applet on the card.
-

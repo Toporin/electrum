@@ -13,16 +13,15 @@ PYINSTALLER_REPO="https://github.com/SomberNight/pyinstaller.git"
 PYINSTALLER_COMMIT="6e455b2c1208465742484436009bfb1e1baf2e01"
 # ^ tag 4.0, plus a custom commit that fixes cross-compilation with MinGW
 
-PYTHON_VERSION=3.7.9
-
-#Satochip pyscard (from https://ci.appveyor.com/project/LudovicRousseau/pyscard)
+# pyscard prebuilt binaries for Satochip 
 # PYSCARD_FILENAME=pyscard-1.9.9-cp36-cp36m-win32.whl  # python 3.6, 32-bit
-# PYSCARD_URL=https://ci.appveyor.com/api/buildjobs/3uiua5o4llvpegbp/artifacts/dist/pyscard-1.9.9-cp36-cp36m-win32.whl
+# PYSCARD_URL=https://github.com/cculianu/Electron-Cash-Build-Tools/releases/download/v1.0/pyscard-1.9.9-cp36-cp36m-win32.whl
 # PYSCARD_SHA256=99d2b450f322f9ed9682fd2a99d95ce781527e371006cded38327efca8158fe7
-PYSCARD_FILENAME=pyscard-1.9.9-cp36-cp36m-win32.whl  # python 3.6, 32-bit
-PYSCARD_URL=https://github.com/cculianu/Electron-Cash-Build-Tools/releases/download/v1.0/pyscard-1.9.9-cp36-cp36m-win32.whl
-PYSCARD_SHA256=99d2b450f322f9ed9682fd2a99d95ce781527e371006cded38327efca8158fe7
+PYSCARD_FILENAME=pyscard-1.9.9-cp37-cp37m-win32.whl # python 3.7, 32-bit
+PYSCARD_URL=https://ci.appveyor.com/api/buildjobs/f9cmce4j8hkau9n4/artifacts/dist/pyscard-1.9.9-cp37-cp37m-win32.whl
+PYSCARD_SHA256=3f7d52dd6694dd369b02e797fe1a3e39b63cf1d1c4b5fc0e1341aafa24f87e7a
 
+PYTHON_VERSION=3.7.9
 
 ## These settings probably don't need change
 export WINEPREFIX=/opt/wine64
